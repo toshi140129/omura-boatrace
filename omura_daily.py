@@ -36,9 +36,9 @@ def fetch_race_result(driver, date_str, race_no):
         time.sleep(3)
 
         if "データがありません" in driver.page_source:
-            return "", "", "", ""
+            return "", "", "", "", ""
 
-        r1, r2, r3, harai = "", "", "", ""
+        r1, r2, r3, harai, ninki = "", "", "", "", ""
 
         # 着順・艇番取得（全角数字を半角に変換）
         tables = driver.find_elements(By.CSS_SELECTOR, "table.is-w495")
@@ -53,21 +53,23 @@ def fetch_race_result(driver, date_str, race_no):
                     elif rank == "2": r2 = boat
                     elif rank == "3": r3 = boat
 
-        # 3連単払戻取得（払戻テーブルは3番目のis-w495）
+        # 3連単払戻・人気取得（払戻テーブルは3番目のis-w495）
         if len(tables) >= 3:
             pay_rows = tables[2].find_elements(By.CSS_SELECTOR, "tbody tr")
             for row in pay_rows:
                 cols = row.find_elements(By.TAG_NAME, "td")
                 if len(cols) >= 3 and "3連単" in cols[0].text:
                     harai = cols[2].text.strip().replace("¥", "").replace(",", "").replace("円", "").strip()
+                    if len(cols) >= 4:
+                        ninki = unicodedata.normalize("NFKC", cols[3].text.strip())
                     break
 
-        print(f"  R{race_no}: {r1}-{r2}-{r3} 払戻={harai}")
-        return r1, r2, r3, harai
+        print(f"  R{race_no}: {r1}-{r2}-{r3} 払戻={harai} 人気={ninki}")
+        return r1, r2, r3, harai, ninki
 
     except Exception as e:
         print(f"  R{race_no} 取得エラー: {e}")
-        return "", "", "", ""
+        return "", "", "", "", ""
 
 def already_exists(date_label):
     if not os.path.exists(CSV_PATH):
@@ -115,7 +117,8 @@ def main():
     row = [date_label,
            r10[0], r10[1], r10[2], r10[3],
            r11[0], r11[1], r11[2], r11[3],
-           r12[0], r12[1], r12[2], r12[3]]
+           r12[0], r12[1], r12[2], r12[3],
+           r10[4], r11[4], r12[4]]
 
     append_csv(row)
     print(f"CSV追記完了: {row}")
