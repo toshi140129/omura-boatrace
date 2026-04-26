@@ -1,0 +1,158 @@
+{
+  "date": "2026-04-26",
+  "fetched_at": "2026-04-26T22:35:25",
+  "r11": {
+    "p1": "1",
+    "p2": "3",
+    "p3": "4",
+    "pay": "850"
+  },
+  "r12_weather": {
+    "wind": "1",
+    "wdir": "15",
+    "wave": "1"
+  },
+  "series_day": "1",
+  "event_type": "ミッドナイト",
+  "matched_samples": 95,
+  "applied_filters": [
+    [
+      "r11_p1",
+      "1"
+    ],
+    [
+      "event_type",
+      "ミッドナイト"
+    ],
+    [
+      "wind_b",
+      "弱"
+    ],
+    [
+      "wave_b",
+      "凪"
+    ]
+  ],
+  "patterns": [
+    {
+      "pattern": "3-5-2",
+      "hit": 2,
+      "total": 95,
+      "prob": 0.0211,
+      "avg_pay": 16585,
+      "ev": 349.2
+    },
+    {
+      "pattern": "1-6-2",
+      "hit": 4,
+      "total": 95,
+      "prob": 0.0421,
+      "avg_pay": 5078,
+      "ev": 213.8
+    },
+    {
+      "pattern": "3-1-6",
+      "hit": 2,
+      "total": 95,
+      "prob": 0.0211,
+      "avg_pay": 9290,
+      "ev": 195.6
+    },
+    {
+      "pattern": "1-4-3",
+      "hit": 6,
+      "total": 95,
+      "prob": 0.0632,
+      "avg_pay": 2938,
+      "ev": 185.6
+    },
+    {
+      "pattern": "1-3-6",
+      "hit": 4,
+      "total": 95,
+      "prob": 0.0421,
+      "avg_pay": 3375,
+      "ev": 142.1
+    },
+    {
+      "pattern": "1-3-5",
+      "hit": 7,
+      "total": 95,
+      "prob": 0.0737,
+      "avg_pay": 1496,
+      "ev": 110.2
+    },
+    {
+      "pattern": "1-5-6",
+      "hit": 3,
+      "total": 95,
+      "prob": 0.0316,
+      "avg_pay": 2993,
+      "ev": 94.5
+    },
+    {
+      "pattern": "1-2-3",
+      "hit": 13,
+      "total": 95,
+      "prob": 0.1368,
+      "avg_pay": 635,
+      "ev": 86.8
+    },
+    {
+      "pattern": "3-1-2",
+      "hit": 2,
+      "total": 95,
+      "prob": 0.0211,
+      "avg_pay": 3775,
+      "ev": 79.5
+    },
+    {
+      "pattern": "1-3-4",
+      "hit": 6,
+      "total": 95,
+      "prob": 0.0632,
+      "avg_pay": 1105,
+      "ev": 69.8
+    },
+    {
+      "pattern": "1-3-2",
+      "hit": 2,
+      "total": 95,
+      "prob": 0.0211,
+      "avg_pay": 3035,
+      "ev": 63.9
+    },
+    {
+      "pattern": "1-2-4",
+      "hit": 5,
+      "total": 95,
+      "prob": 0.0526,
+      "avg_pay": 1028,
+      "ev": 54.1
+    },
+    {
+      "pattern": "1-4-5",
+      "hit": 4,
+      "total": 95,
+      "prob": 0.0421,
+      "avg_pay": 1160,
+      "ev": 48.8
+    },
+    {
+      "pattern": "2-1-6",
+      "hit": 2,
+      "total": 95,
+      "prob": 0.0211,
+      "avg_pay": 2270,
+      "ev": 47.8
+    },
+    {
+      "pattern": "1-5-4",
+      "hit": 2,
+      "total": 95,
+      "prob": 0.0211,
+      "avg_pay": 2190,
+      "ev": 46.1
+    }
+  ]
+}
