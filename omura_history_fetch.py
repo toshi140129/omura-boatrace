@@ -38,6 +38,7 @@ HEADER = [
     "10R_風速", "10R_風向", "10R_波高",
     "11R_風速", "11R_風向", "11R_波高",
     "12R_風速", "12R_風向", "12R_波高",
+    "節日数", "開催種別",
 ]
 
 
@@ -136,6 +137,39 @@ def parse_weather(html):
         return ("", "", "")
 
 
+def parse_raceindex(html):
+    """Return (節日数, 開催種別)."""
+    if not html or "データがありません" in html:
+        return ("", "")
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        date_tabs = [li for li in soup.find_all("li") if li.find(class_="tab2_inner")]
+        day_num = ""
+        for i, li in enumerate(date_tabs):
+            if "is-active1" in (li.get("class") or []):
+                day_num = i + 1
+                break
+        times = re.findall(r"\b(\d{1,2}):(\d{2})\b", html)
+        r1_hour = None
+        for h, _m in times:
+            hi = int(h)
+            if 8 <= hi <= 23:
+                r1_hour = hi
+                break
+        kind = ""
+        if r1_hour is not None:
+            if r1_hour < 12:
+                kind = "デイ"
+            elif r1_hour < 17:
+                kind = "ナイター"
+            else:
+                kind = "ミッドナイト"
+        return (str(day_num) if day_num else "", kind)
+    except Exception as e:
+        print(f"  raceindex parse error: {e}", file=sys.stderr, flush=True)
+        return ("", "")
+
+
 def fetch_both(args):
     """Fetch raceresult + beforeinfo for a single (date, rno)."""
     date_str, rno = args
@@ -150,6 +184,15 @@ def fetch_both(args):
     result = parse_race_result(fetch_html(result_url))
     weather = parse_weather(fetch_html(before_url))
     return (date_str, rno, result, weather)
+
+
+def fetch_meta(date_str):
+    """Fetch raceindex for a single date and return (date_str, (節日数, 開催種別))."""
+    url = (
+        f"https://www.boatrace.jp/owpc/pc/race/raceindex?"
+        f"jcd={JYOJO}&hd={date_str}"
+    )
+    return (date_str, parse_raceindex(fetch_html(url)))
 
 
 def read_existing():
@@ -223,6 +266,13 @@ def main():
 
     print(f"全フェッチ完了: {time.time()-start_t:.0f}s", flush=True)
 
+    meta_results = {}
+    meta_targets = [dl.replace("-", "") for dl in target_dates]
+    print(f"raceindex(節日数+開催種別)取得: {len(meta_targets)}件", flush=True)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        for date_str, meta in ex.map(fetch_meta, meta_targets):
+            meta_results[date_str] = meta
+
     added = 0
     skipped_empty = 0
     for dl in target_dates:
@@ -233,6 +283,7 @@ def main():
         if not (r10[0] or r11[0] or r12[0]):
             skipped_empty += 1
             continue
+        day_num, kind = meta_results.get(ds, ("", ""))
         row = [
             dl,
             r10[0], r10[1], r10[2], r10[3],
@@ -242,6 +293,7 @@ def main():
             w10[0], w10[1], w10[2],
             w11[0], w11[1], w11[2],
             w12[0], w12[1], w12[2],
+            day_num, kind,
         ]
         existing[dl] = row
         added += 1
