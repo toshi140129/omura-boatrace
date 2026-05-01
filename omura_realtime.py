@@ -25,6 +25,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -56,12 +57,27 @@ def log(msg):
         pass
 
 
+def _ascii_only(s):
+    """BOM・全角空白・非ASCII を除去して ASCII のみ返す。
+    LINE Messaging API の Bearer/user_id は ASCII のみなので、混入を弾く。"""
+    if s is None:
+        return ""
+    # BOM (﻿) を含む全 whitespace と Unicode 空白を strip
+    s = s.replace("﻿", "")
+    # 全角スペース・タブ・改行・通常スペースを両端から除去
+    for ch in ("　", "\t", "\r", "\n", " "):
+        s = s.strip(ch)
+    # 非ASCII (空白以外) は無音で除去
+    return s.encode("ascii", errors="ignore").decode("ascii")
+
+
 def load_env():
     env = {}
     if os.path.exists(ENV_PATH):
-        with open(ENV_PATH, encoding="utf-8") as f:
+        # utf-8-sig は先頭BOMを自動除去
+        with open(ENV_PATH, encoding="utf-8-sig") as f:
             for line in f:
-                s = line.strip()
+                s = line.strip().lstrip("﻿")
                 if s and not s.startswith("#") and "=" in s:
                     k, v = s.split("=", 1)
                     env[k.strip()] = v.strip()
@@ -317,18 +333,39 @@ def compute_ev(matched):
 
 
 def line_push(token, user_id, text):
+    # token / user_id を念押しで ASCII にクランプ（headers は latin-1 でエンコードされる）
+    token = _ascii_only(token)
+    user_id = _ascii_only(user_id)
+    if not token or not user_id:
+        log("LINE error: token または user_id が空（ASCII化後）")
+        return False
     body = json.dumps(
         {"to": user_id, "messages": [{"type": "text", "text": text}]},
         ensure_ascii=False,
     ).encode("utf-8")
+    auth = f"Bearer {token}"
+    # 明示的に latin-1 で encode できるか事前検証（できなければ早期 fail で詳細ログ）
+    try:
+        auth.encode("latin-1")
+    except UnicodeEncodeError as e:
+        log(f"LINE error: tokenに非ASCII残存 (encode失敗) {e}")
+        return False
     req = urllib.request.Request(
         "https://api.line.me/v2/bot/message/push",
         method="POST", data=body,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        headers={"Authorization": auth, "Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as res:
             return res.status == 200
+    except urllib.error.HTTPError as e:
+        body_msg = ""
+        try:
+            body_msg = e.read().decode("utf-8", "replace")[:200]
+        except Exception:
+            pass
+        log(f"LINE error: HTTP {e.code} {e.reason} {body_msg}")
+        return False
     except Exception as e:
         log(f"LINE error: {e}")
         return False
@@ -473,8 +510,15 @@ def main():
     ev_plus = [p for p in ev_list if p["ev"] >= EV_THRESHOLD]
     if ev_plus and state.get("last_notified_date") != today_label:
         env = load_env()
-        token = env.get("LINE_CHANNEL_ACCESS_TOKEN")
-        user_id = env.get("LINE_USER_ID")
+        token_raw = env.get("LINE_CHANNEL_ACCESS_TOKEN", "")
+        user_id_raw = env.get("LINE_USER_ID", "")
+        token = _ascii_only(token_raw)
+        user_id = _ascii_only(user_id_raw)
+        if len(token) != len(token_raw) or len(user_id) != len(user_id_raw):
+            log(
+                f"WARN: .env に非ASCII文字が混入 → 除去後 "
+                f"token={len(token)}文字 user_id={len(user_id)}文字"
+            )
         if token and user_id:
             text = build_line_message(payload, ev_plus[:5])
             if line_push(token, user_id, text):
