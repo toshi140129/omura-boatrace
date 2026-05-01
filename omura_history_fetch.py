@@ -39,6 +39,7 @@ HEADER = [
     "11R_風速", "11R_風向", "11R_波高",
     "12R_風速", "12R_風向", "12R_波高",
     "節日数", "開催種別",
+    "12R_天気", "12R_気温", "12R_水温",
 ]
 
 
@@ -99,15 +100,16 @@ def parse_race_result(html):
 
 
 def parse_weather(html):
-    """Return (wind_speed, wind_dir, wave). All '' if missing."""
+    """Return (wind_speed, wind_dir, wave, weather, air_temp, water_temp).
+    All '' if missing. weather は「晴」「曇り」「雨」など。気温・水温は数値のみ。"""
     if not html or "データがありません" in html:
-        return ("", "", "")
+        return ("", "", "", "", "", "")
     try:
         soup = BeautifulSoup(html, "html.parser")
         w = soup.select_one(".weather1")
         if not w:
-            return ("", "", "")
-        wind_speed = wind_dir = wave = ""
+            return ("", "", "", "", "", "")
+        wind_speed = wind_dir = wave = weather = air_temp = water_temp = ""
         node = w.select_one(".is-wind .weather1_bodyUnitLabelData")
         if node:
             m = re.search(
@@ -131,10 +133,28 @@ def parse_weather(html):
                 if m:
                     wind_dir = m.group(1)
                     break
-        return (wind_speed, wind_dir, wave)
+        node = w.select_one(".is-weather .weather1_bodyUnitLabelTitle")
+        if node:
+            weather = node.get_text(strip=True)
+        # 気温は .is-direction (実際には1番目のbodyUnit) の data
+        for u in w.select(".weather1_bodyUnit"):
+            title = u.select_one(".weather1_bodyUnitLabelTitle")
+            data = u.select_one(".weather1_bodyUnitLabelData")
+            if not title or not data:
+                continue
+            t = title.get_text(strip=True)
+            d = unicodedata.normalize("NFKC", data.get_text(strip=True))
+            m = re.search(r"(-?\d+(?:\.\d+)?)", d)
+            if not m:
+                continue
+            if t == "気温":
+                air_temp = m.group(1)
+            elif t == "水温":
+                water_temp = m.group(1)
+        return (wind_speed, wind_dir, wave, weather, air_temp, water_temp)
     except Exception as e:
         print(f"  weather parse error: {e}", file=sys.stderr, flush=True)
-        return ("", "", "")
+        return ("", "", "", "", "", "")
 
 
 def parse_raceindex(html):
@@ -275,11 +295,13 @@ def main():
 
     added = 0
     skipped_empty = 0
+    EMPTY_W = ("", "", "", "", "", "")
+    EMPTY_R = ("", "", "", "", "")
     for dl in target_dates:
         ds = dl.replace("-", "")
-        r10, w10 = results.get((ds, 10), (("", "", "", "", ""), ("", "", "")))
-        r11, w11 = results.get((ds, 11), (("", "", "", "", ""), ("", "", "")))
-        r12, w12 = results.get((ds, 12), (("", "", "", "", ""), ("", "", "")))
+        r10, w10 = results.get((ds, 10), (EMPTY_R, EMPTY_W))
+        r11, w11 = results.get((ds, 11), (EMPTY_R, EMPTY_W))
+        r12, w12 = results.get((ds, 12), (EMPTY_R, EMPTY_W))
         if not (r10[0] or r11[0] or r12[0]):
             skipped_empty += 1
             continue
@@ -294,6 +316,7 @@ def main():
             w11[0], w11[1], w11[2],
             w12[0], w12[1], w12[2],
             day_num, kind,
+            w12[3], w12[4], w12[5],
         ]
         existing[dl] = row
         added += 1

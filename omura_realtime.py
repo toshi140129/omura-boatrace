@@ -119,14 +119,15 @@ def parse_race_result(html):
 
 
 def parse_weather(html):
+    """Return (wind, wdir, wave, weather, air_temp, water_temp)."""
     if not html or "データがありません" in html:
-        return ("", "", "")
+        return ("", "", "", "", "", "")
     try:
         soup = BeautifulSoup(html, "html.parser")
         w = soup.select_one(".weather1")
         if not w:
-            return ("", "", "")
-        wind_speed = wind_dir = wave = ""
+            return ("", "", "", "", "", "")
+        wind_speed = wind_dir = wave = weather = air_temp = water_temp = ""
         node = w.select_one(".is-wind .weather1_bodyUnitLabelData")
         if node:
             m = re.search(r"(\d+)", unicodedata.normalize("NFKC", node.get_text(strip=True)))
@@ -144,10 +145,27 @@ def parse_weather(html):
                 if m:
                     wind_dir = m.group(1)
                     break
-        return (wind_speed, wind_dir, wave)
+        node = w.select_one(".is-weather .weather1_bodyUnitLabelTitle")
+        if node:
+            weather = node.get_text(strip=True)
+        for u in w.select(".weather1_bodyUnit"):
+            title = u.select_one(".weather1_bodyUnitLabelTitle")
+            data = u.select_one(".weather1_bodyUnitLabelData")
+            if not title or not data:
+                continue
+            t = title.get_text(strip=True)
+            d = unicodedata.normalize("NFKC", data.get_text(strip=True))
+            m = re.search(r"(-?\d+(?:\.\d+)?)", d)
+            if not m:
+                continue
+            if t == "気温":
+                air_temp = m.group(1)
+            elif t == "水温":
+                water_temp = m.group(1)
+        return (wind_speed, wind_dir, wave, weather, air_temp, water_temp)
     except Exception as e:
         log(f"weather parse error: {e}")
-        return ("", "", "")
+        return ("", "", "", "", "", "")
 
 
 def parse_raceindex(html):
@@ -220,8 +238,8 @@ def load_history():
         for cols in r:
             if not cols or not cols[0].strip():
                 continue
-            if len(cols) < 27:
-                cols = list(cols) + [""] * (27 - len(cols))
+            if len(cols) < 30:
+                cols = list(cols) + [""] * (30 - len(cols))
             try:
                 pay = int(cols[12]) if cols[12].isdigit() else 0
             except ValueError:
@@ -236,6 +254,9 @@ def load_history():
                 "wave_b": bucket_wave(cols[24]),
                 "series_day": cols[25],
                 "event_type": cols[26],
+                "weather": cols[27],
+                "air_temp": cols[28],
+                "water_temp": cols[29],
             })
     return rows
 
@@ -250,9 +271,9 @@ def match_history(rows, conds):
     cur = list(rows)
     applied = []
     tiers = [
-        ["r11_p1", "event_type"],   # Tier 1
-        ["wind_b", "wave_b"],         # Tier 2
-        ["series_day", "r12_wdir"],   # Tier 3
+        ["r11_p1", "event_type"],     # Tier 1
+        ["weather", "wind_b", "wave_b"],  # Tier 2
+        ["series_day", "r12_wdir"],     # Tier 3
     ]
     for tier in tiers:
         for f in tier:
@@ -314,14 +335,15 @@ def line_push(token, user_id, text):
 
 
 def build_line_message(payload, ev_plus):
+    w = payload["r12_weather"]
     lines = [
         "【大村12R リアルタイム期待値】",
         f"{payload['date']} {payload['event_type']} {payload['series_day']}日目",
         "",
         f"■11R結果: {payload['r11']['p1']}-{payload['r11']['p2']}-{payload['r11']['p3']}"
         f" ({payload['r11']['pay']}円)",
-        f"■12R気象: 風{payload['r12_weather']['wind']}m / 波{payload['r12_weather']['wave']}cm"
-        f" / 風向{payload['r12_weather']['wdir']}",
+        f"■12R気象: 天気{w['weather']} / 風{w['wind']}m / 波{w['wave']}cm"
+        f" / 風向{w['wdir']} / 気温{w['air_temp']}℃ / 水温{w['water_temp']}℃",
         f"■類似サンプル: {payload['matched_samples']}日",
     ]
     if payload["applied_filters"]:
@@ -384,7 +406,10 @@ def main():
         f"rno=12&jcd={JYOJO}&hd={today}"
     )
     weather = parse_weather(fetch_html(r12_url))
-    log(f"12R気象: 風{weather[0]}m 風向{weather[1]} 波{weather[2]}cm")
+    log(
+        f"12R気象: 天気={weather[3]} 風{weather[0]}m 風向{weather[1]} 波{weather[2]}cm "
+        f"気温{weather[4]}℃ 水温{weather[5]}℃"
+    )
 
     idx_url = (
         f"https://www.boatrace.jp/owpc/pc/race/raceindex?"
@@ -401,6 +426,7 @@ def main():
         "wind_b": bucket_wind(weather[0]),
         "wave_b": bucket_wave(weather[2]),
         "r12_wdir": weather[1] or None,
+        "weather": weather[3] or None,
         "series_day": series_day or None,
         "event_type": event_type or None,
     }
@@ -413,7 +439,10 @@ def main():
         "date": today_label,
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
         "r11": {"p1": r11[0], "p2": r11[1], "p3": r11[2], "pay": r11[3]},
-        "r12_weather": {"wind": weather[0], "wdir": weather[1], "wave": weather[2]},
+        "r12_weather": {
+            "wind": weather[0], "wdir": weather[1], "wave": weather[2],
+            "weather": weather[3], "air_temp": weather[4], "water_temp": weather[5],
+        },
         "series_day": series_day,
         "event_type": event_type,
         "matched_samples": valid,
