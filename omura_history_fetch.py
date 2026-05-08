@@ -40,6 +40,7 @@ HEADER = [
     "12R_風速", "12R_風向", "12R_波高",
     "節日数", "開催種別",
     "12R_天気", "12R_気温", "12R_水温",
+    "12R_安定板使用艇数", "12R_潮位",
 ]
 
 
@@ -100,16 +101,16 @@ def parse_race_result(html):
 
 
 def parse_weather(html):
-    """Return (wind_speed, wind_dir, wave, weather, air_temp, water_temp).
-    All '' if missing. weather は「晴」「曇り」「雨」など。気温・水温は数値のみ。"""
+    """Return (wind_speed, wind_dir, wave, weather, air_temp, water_temp, tide_level).
+    All '' if missing. weather は「晴」「曇り」「雨」など。気温・水温・潮位は数値のみ。"""
     if not html or "データがありません" in html:
-        return ("", "", "", "", "", "")
+        return ("", "", "", "", "", "", "")
     try:
         soup = BeautifulSoup(html, "html.parser")
         w = soup.select_one(".weather1")
         if not w:
-            return ("", "", "", "", "", "")
-        wind_speed = wind_dir = wave = weather = air_temp = water_temp = ""
+            return ("", "", "", "", "", "", "")
+        wind_speed = wind_dir = wave = weather = air_temp = water_temp = tide_level = ""
         node = w.select_one(".is-wind .weather1_bodyUnitLabelData")
         if node:
             m = re.search(
@@ -136,7 +137,6 @@ def parse_weather(html):
         node = w.select_one(".is-weather .weather1_bodyUnitLabelTitle")
         if node:
             weather = node.get_text(strip=True)
-        # 気温は .is-direction (実際には1番目のbodyUnit) の data
         for u in w.select(".weather1_bodyUnit"):
             title = u.select_one(".weather1_bodyUnitLabelTitle")
             data = u.select_one(".weather1_bodyUnitLabelData")
@@ -151,10 +151,47 @@ def parse_weather(html):
                 air_temp = m.group(1)
             elif t == "水温":
                 water_temp = m.group(1)
-        return (wind_speed, wind_dir, wave, weather, air_temp, water_temp)
+            elif t == "潮位":
+                tide_level = m.group(1)
+        # weather2セクションにも潮位がある場合
+        if not tide_level:
+            w2 = soup.select_one(".weather2")
+            if w2:
+                for u in w2.select(".weather2_bodyUnit"):
+                    title = u.select_one(".weather2_bodyUnitLabelTitle")
+                    data = u.select_one(".weather2_bodyUnitLabelData")
+                    if title and data and "潮位" in title.get_text(strip=True):
+                        d = unicodedata.normalize("NFKC", data.get_text(strip=True))
+                        m = re.search(r"(-?\d+(?:\.\d+)?)", d)
+                        if m:
+                            tide_level = m.group(1)
+        return (wind_speed, wind_dir, wave, weather, air_temp, water_temp, tide_level)
     except Exception as e:
         print(f"  weather parse error: {e}", file=sys.stderr, flush=True)
-        return ("", "", "", "", "", "")
+        return ("", "", "", "", "", "", "")
+
+
+def parse_stabilizer(html):
+    """Return count of boats using stabilizer (安定板) as string, or ''."""
+    if not html or "データがありません" in html:
+        return ""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for table in soup.find_all("table"):
+            headers = [h.get_text(strip=True) for h in table.select("thead th")]
+            if "安定板" not in headers:
+                continue
+            col_idx = headers.index("安定板")
+            count = sum(
+                1 for tr in table.select("tbody tr")
+                if len(tr.find_all("td")) > col_idx
+                and tr.find_all("td")[col_idx].get_text(strip=True) == "○"
+            )
+            return str(count)
+        return ""
+    except Exception as e:
+        print(f"  stabilizer parse error: {e}", file=sys.stderr, flush=True)
+        return ""
 
 
 def parse_raceindex(html):
@@ -202,8 +239,10 @@ def fetch_both(args):
         f"rno={rno}&jcd={JYOJO}&hd={date_str}"
     )
     result = parse_race_result(fetch_html(result_url))
-    weather = parse_weather(fetch_html(before_url))
-    return (date_str, rno, result, weather)
+    before_html = fetch_html(before_url)
+    weather = parse_weather(before_html)
+    stabilizer = parse_stabilizer(before_html) if rno == 12 else ""
+    return (date_str, rno, result, weather, stabilizer)
 
 
 def fetch_meta(date_str):
@@ -271,8 +310,8 @@ def main():
     results = {}
     done_count = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        for date_str, rno, race, weather in ex.map(fetch_both, tasks):
-            results[(date_str, rno)] = (race, weather)
+        for date_str, rno, race, weather, stabilizer in ex.map(fetch_both, tasks):
+            results[(date_str, rno)] = (race, weather, stabilizer)
             done_count += 1
             if done_count % 60 == 0 or done_count == len(tasks):
                 elapsed = time.time() - start_t
@@ -295,13 +334,13 @@ def main():
 
     added = 0
     skipped_empty = 0
-    EMPTY_W = ("", "", "", "", "", "")
+    EMPTY_W = ("", "", "", "", "", "", "")
     EMPTY_R = ("", "", "", "", "")
     for dl in target_dates:
         ds = dl.replace("-", "")
-        r10, w10 = results.get((ds, 10), (EMPTY_R, EMPTY_W))
-        r11, w11 = results.get((ds, 11), (EMPTY_R, EMPTY_W))
-        r12, w12 = results.get((ds, 12), (EMPTY_R, EMPTY_W))
+        r10, w10, _ = results.get((ds, 10), (EMPTY_R, EMPTY_W, ""))
+        r11, w11, _ = results.get((ds, 11), (EMPTY_R, EMPTY_W, ""))
+        r12, w12, stab = results.get((ds, 12), (EMPTY_R, EMPTY_W, ""))
         if not (r10[0] or r11[0] or r12[0]):
             skipped_empty += 1
             continue
@@ -317,6 +356,7 @@ def main():
             w12[0], w12[1], w12[2],
             day_num, kind,
             w12[3], w12[4], w12[5],
+            stab, w12[6],
         ]
         existing[dl] = row
         added += 1
