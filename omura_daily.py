@@ -21,7 +21,6 @@ def last_date():
 
 def git_push():
     try:
-        subprocess.run(["git", "-C", HERE, "pull", "--rebase", "origin", "master"], check=True)
         subprocess.run(["git", "-C", HERE, "add", "omura_results.csv"], check=True)
         diff = subprocess.run(["git", "-C", HERE, "diff", "--cached", "--quiet"])
         if diff.returncode == 0:
@@ -29,6 +28,7 @@ def git_push():
             return
         subprocess.run(["git", "-C", HERE, "commit", "-m",
                         f"auto update {datetime.now().strftime('%Y-%m-%d')}"], check=True)
+        subprocess.run(["git", "-C", HERE, "pull", "--rebase", "--autostash", "origin", "master"], check=True)
         subprocess.run(["git", "-C", HERE, "push", "origin", "master"], check=True)
         print("GitHub push 完了")
     except subprocess.CalledProcessError as e:
