@@ -23,7 +23,8 @@ GitHub Actions（.github/workflows/line_notify.yml）から15分おきに起動�
   NOTIFY_BUDGET              配分する総額（既定 10000）
   GITHUB_OUTPUT              Actions が渡す。done=true を書き出して当日の処理完了を記録する
 
-PCで動かす場合は、このファイルと同じフォルダの .env（KEY=VALUE 形式）からも読む。
+PCで動かす場合は、このファイルと同じフォルダの .env、無ければ隣の kojima-boatrace\\.env
+（児島版のLINE設定）を読む。
 """
 import json
 import os
@@ -56,16 +57,25 @@ def log(msg):
 
 
 # ---------------------------------------------------------------- 設定
+ENV_CANDIDATES = [
+    os.path.join(HERE, ".env"),
+    # PCで動かす場合は児島版（kojima-boatrace）の .env をそのまま流用できる
+    os.path.join(os.path.dirname(HERE), "kojima-boatrace", ".env"),
+]
+
+
 def load_env():
     env = {}
-    path = os.path.join(HERE, ".env")
-    if os.path.exists(path):
+    for path in ENV_CANDIDATES:
+        if not os.path.exists(path):
+            continue
         with open(path, encoding="utf-8-sig") as f:
             for line in f:
                 s = line.strip()
                 if s and not s.startswith("#") and "=" in s:
                     k, v = s.split("=", 1)
-                    env[k.strip()] = v.strip()
+                    env[k.strip()] = v.strip().strip('"').strip("'")
+        break
     env.update({k: v for k, v in os.environ.items() if k.startswith(("LINE_", "NOTIFY_"))})
     return env
 
