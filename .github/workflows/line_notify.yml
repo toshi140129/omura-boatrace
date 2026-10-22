@@ -1,0 +1,78 @@
+name: 12R LINE通知
+
+# 日本時間 19:00〜23:45 に15分おきに起動（cron は UTC 表記）。
+# 各起動は「まだ早い」「開催なし」「送信済み」なら数十秒で終わり、
+# 11R締切の40分前〜12R締切の間に入った起動だけが結果確定まで待って通知する。
+on:
+  schedule:
+    - cron: "0,15,30,45 10-14 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "対象日 YYYYMMDD（空なら今日）"
+        required: false
+        default: ""
+      force:
+        description: "時間帯チェックを無視して即実行"
+        type: boolean
+        default: true
+      dry_run:
+        description: "LINEに送らず本文をログに出すだけ"
+        type: boolean
+        default: true
+
+concurrency:
+  group: line-notify
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: 今日の日付（日本時間）
+        id: today
+        run: |
+          d="${{ inputs.date }}"
+          if [ -z "$d" ]; then d=$(TZ=Asia/Tokyo date +%Y%m%d); fi
+          echo "date=$d" >> "$GITHUB_OUTPUT"
+
+      - name: 本日分が処理済みか確認
+        id: done
+        if: github.event_name == 'schedule'
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: line-notify-done-${{ steps.today.outputs.date }}
+          lookup-only: true
+
+      - uses: actions/checkout@v4
+        if: steps.done.outputs.cache-hit != 'true'
+
+      - name: 依存パッケージ
+        if: steps.done.outputs.cache-hit != 'true'
+        run: pip install --quiet beautifulsoup4
+
+      - name: 通知スクリプト実行
+        id: run
+        if: steps.done.outputs.cache-hit != 'true'
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          NOTIFY_DATE: ${{ steps.today.outputs.date }}
+          NOTIFY_FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force && '1' || '' }}
+          NOTIFY_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '' }}
+        run: python omura_line_notify.py
+
+      - name: 本日分を処理済みとして記録
+        if: github.event_name == 'schedule' && steps.run.outputs.done == 'true'
+        run: mkdir -p state && echo done > state/done
+
+      - uses: actions/cache/save@v4
+        if: github.event_name == 'schedule' && steps.run.outputs.done == 'true'
+        with:
+          path: state
+          key: line-notify-done-${{ steps.today.outputs.date }}
