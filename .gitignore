@@ -2,3 +2,4 @@ __pycache__/
 realtime.log
 realtime_state.json
 .env
+extra_debug/
