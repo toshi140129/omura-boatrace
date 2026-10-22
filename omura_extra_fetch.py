@@ -49,7 +49,8 @@ DAILY_EXTRA_CSV = os.path.join(HERE, "omura_daily_extra.csv")
 DEBUG_DIR = os.path.join(HERE, "extra_debug")
 
 JYOJO = "24"
-WORKERS = 6
+WORKERS = 8          # 同時に取得する日数
+INNER_WORKERS = 4    # 1日分の中で同時に取るページ数（最大同時接続 = WORKERS × INNER_WORKERS）
 SLEEP = 0.2
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 BASE = "https://www.boatrace.jp/owpc/pc/race/"
@@ -121,9 +122,10 @@ RACE_TYPE_RE = re.compile(
     r"(優勝戦|準優勝戦|準優進出戦|順位決定戦|特別選抜[A-Z]?|予選特選|選抜|特選|予選|一般戦|一般|"
     r"ドリーム戦|ドリーム|トライアル\d*|敗者戦|選抜戦|シード戦)"
 )
-GRADE_RE = re.compile(r'class="[^"]*\bis-(SG|G1|G2|G3|ippan|ladies|rookie|venus|takumi|master|shinnyu)\b')
+# 見出し <div class="heading2_title is-SGa "> / is-G1a / is-G1b / is-G3a / is-ippan のように末尾に a/b が付く
+GRADE_RE = re.compile(r'heading2_title\s+is-(SG|PG1|G1|G2|G3|ippan|ladies|rookie|venus|takumi|master|shinnyu)[a-z]?\b')
 GRADE_JP = {
-    "SG": "SG", "G1": "G1", "G2": "G2", "G3": "G3", "ippan": "一般",
+    "SG": "SG", "PG1": "G1", "G1": "G1", "G2": "G2", "G3": "G3", "ippan": "一般",
     "ladies": "一般", "rookie": "一般", "venus": "一般", "takumi": "一般", "master": "一般", "shinnyu": "一般",
 }
 
@@ -137,10 +139,18 @@ def parse_racelist(html):
     text = nfkc(text)
 
     race_type = ""
-    m = re.search(r"(\S{1,12})\s+\d{4}m", text)
-    if m:
-        t = RACE_TYPE_RE.search(m.group(1))
-        race_type = t.group(1) if t else m.group(1)
+    # <h3 class="title16_titleDetail__add2020">準優勝戦　　　1800m</h3> の形
+    h3 = soup.select_one("h3.title16_titleDetail__add2020")
+    if h3:
+        ht = nfkc(h3.get_text(" ", strip=True))
+        ht = re.sub(r"\d{4}m.*$", "", ht).strip()
+        t = RACE_TYPE_RE.search(ht)
+        race_type = t.group(1) if t else ht
+    if not race_type:
+        m = re.search(r"(\S{1,12})\s+\d{4}m", text)
+        if m:
+            t = RACE_TYPE_RE.search(m.group(1))
+            race_type = t.group(1) if t else m.group(1)
 
     title = ""
     h = soup.select_one(".heading2_titleName") or soup.select_one("h2")
@@ -165,13 +175,15 @@ def parse_racelist(html):
         if not trs:
             continue
         tds = trs[0].find_all("td")
-        if len(tds) < 7:
+        if len(tds) < 8:
             continue
         waku = first_num(tds[0].get_text(), r"\d")
         if not waku:
             continue
+        # 1行目の td: 0=枠, 1=写真, 2=登録番号/級別/選手名/支部/年齢体重, 3=F数/L数/平均ST,
+        #            4=全国勝率, 5=当地勝率, 6=モーター, 7=ボート, 8以降=今節成績
         info = {}
-        cell = tds[1]
+        cell = tds[2]
         ct = nfkc(cell.get_text(" ", strip=True))
         m = re.search(r"(\d{4})\s*/\s*([AB][12])", ct)
         if m:
@@ -187,7 +199,7 @@ def parse_racelist(html):
         m = re.search(r"(\d+(?:\.\d+)?)kg", ct)
         info["体重"] = m.group(1) if m else ""
 
-        fl = lines(tds[2])
+        fl = lines(tds[3])
         info["F数"] = info["L数"] = info["平均ST"] = ""
         for t in fl:
             if t.startswith("F"):
@@ -203,10 +215,10 @@ def parse_racelist(html):
             for i, k in enumerate(keys):
                 info[k] = vals[i] if i < len(vals) else ""
 
-        three(tds[3], ("全国勝率", "全国2連率", "全国3連率"))
-        three(tds[4], ("当地勝率", "当地2連率", "当地3連率"))
-        three(tds[5], ("モーター番号", "モーター2連率", "モーター3連率"))
-        three(tds[6], ("ボート番号", "ボート2連率", "ボート3連率"))
+        three(tds[4], ("全国勝率", "全国2連率", "全国3連率"))
+        three(tds[5], ("当地勝率", "当地2連率", "当地3連率"))
+        three(tds[6], ("モーター番号", "モーター2連率", "モーター3連率"))
+        three(tds[7], ("ボート番号", "ボート2連率", "ボート3連率"))
         boats[waku] = info
     return (race_type, title, grade, boats)
 
@@ -251,24 +263,24 @@ def parse_beforeinfo(html):
         if not trs:
             continue
         tds = trs[0].find_all("td")
-        if len(tds) < 5:
+        if len(tds) < 6:
             continue
         waku = first_num(tds[0].get_text(), r"\d")
         if not waku:
             continue
         info = {"体重": "", "調整重量": "", "展示タイム": "", "チルト": ""}
-        # 1行目: 枠, 選手, 体重, 展示タイム, チルト, プロペラ, 部品交換, (前走成績...)
-        info["体重"] = first_num(tds[2].get_text(), r"\d+(?:\.\d+)?")
-        info["展示タイム"] = first_num(tds[3].get_text(), r"\d\.\d{2}")
-        info["チルト"] = first_num(tds[4].get_text(), r"-?\d+(?:\.\d+)?")
-        # 2行目以降に調整重量
+        # 1行目の td: 0=枠, 1=写真, 2=選手名, 3=体重, 4=展示タイム, 5=チルト, 6=プロペラ, 7=部品交換, 8以降=前走成績
+        info["体重"] = first_num(tds[3].get_text(), r"\d+(?:\.\d+)?")
+        info["展示タイム"] = first_num(tds[4].get_text(), r"\d\.\d{2}")
+        info["チルト"] = first_num(tds[5].get_text(), r"-?\d+(?:\.\d+)?")
+        # 3行目の先頭 td が調整重量（"0.0" "1.5" など小数）。2行目の「進入」の整数は除外する
         for tr in trs[1:]:
-            for td in tr.find_all("td"):
-                t = nfkc(td.get_text(" ", strip=True))
-                if re.fullmatch(r"\d+(?:\.\d+)?", t) and info["調整重量"] == "":
-                    info["調整重量"] = t
-                    break
-            if info["調整重量"] != "":
+            tds2 = tr.find_all("td")
+            if not tds2:
+                continue
+            t = nfkc(tds2[0].get_text(" ", strip=True))
+            if re.fullmatch(r"\d+\.\d+", t):
+                info["調整重量"] = t
                 break
         boats[waku] = info
     starts = parse_start_table(soup, "スタート展示")
@@ -367,13 +379,14 @@ def fetch_day(date_str, save_html=False):
     if no_data(r12):
         return None
     htmls[("raceresult", 12)] = r12
-    for rno in range(1, 12):
-        htmls[("raceresult", rno)] = get("raceresult", rno)
+    # 残り19ページ。サーバー応答が1件あたり約9秒かかるため、1日分の中でも並列に取る
+    keys = [("raceresult", rno) for rno in range(1, 12)]
     for rno in MAIN_RACES:
-        htmls[("racelist", rno)] = get("racelist", rno)
-        htmls[("beforeinfo", rno)] = get("beforeinfo", rno)
-    htmls[("odds3t", 11)] = get("odds3t", 11)
-    htmls[("odds3t", 12)] = get("odds3t", 12)
+        keys += [("racelist", rno), ("beforeinfo", rno)]
+    keys += [("odds3t", 11), ("odds3t", 12)]
+    with ThreadPoolExecutor(max_workers=INNER_WORKERS) as ex:
+        for key, html in zip(keys, ex.map(lambda k: get(*k), keys)):
+            htmls[key] = html
 
     day = {"日付": date_str, "races": {}, "racers": {}, "meta": {}, "odds11": {}, "odds12": {}}
     for rno in range(1, 13):
