@@ -3,12 +3,13 @@ omura_line_notify.py — 大村12R「熱い日」LINE通知
 
 流れ
   1. 当日の大村の締切予定時刻（11R・12R）を boatrace.jp から取得
-  2. 11Rの結果が確定するまで待つ（約45秒おきに確認）
+  2. 11Rの結果が確定するまで待つ（20秒おきに確認。待つ間に10R結果・12R出走表は先に取っておく）
   3. 11Rの1着が1号艇なら、A=11Rの2着・B=11Rの3着 を使って
      12Rの買い目 1-A-全 / 1-B-全 / 1-全-A / 1-全-B のうち40倍未満を抽出
   4. 見送り条件（12Rが雨 / 1号艇の全国勝率が他艇最高より1.0以上低い /
      1号艇の展示タイムが4位以下）と②（10Rと11Rの3着順が完全一致）を判定
-  5. 1万円を 1/オッズ比で配分した買い目表をLINEにプッシュ送信
+  5. 1万円を 1/オッズ比で配分した買い目表をLINEにプッシュ送信（1日1通だけ。情報が揃った時点ですぐ送る）
+     ※12Rの展示タイムは締切10分前ごろにしか出ないので待たない。出ていれば判定に入れる
 
 GitHub Actions（.github/workflows/line_notify.yml）から15分おきに起動される前提だが、
 環境変数を渡せばPCのタスクスケジューラからも同じように動く。
@@ -34,6 +35,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from bs4 import BeautifulSoup
@@ -46,9 +48,10 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 ODDS_MAX = 40.0            # これ未満のオッズだけ買う
 WAIT_BEFORE_11R_MIN = 40   # 11R締切の何分前から待機を始めるか
-POLL_SEC = 45              # 11R結果・展示タイムの確認間隔
-EXHIBITION_WAIT_MIN = 12   # 11R確定後、展示タイムが出るのを待つ上限（分）
-SEND_MARGIN_MIN = 8        # 12R締切の何分前までには必ず送るか
+POLL_SEC = 20              # 11R結果の確認間隔（秒）
+# 12Rの展示タイムは12Rの展示航走後（締切10分前ごろ）に出るため、待つと通知が遅れる。
+# 「情報が揃った時点ですぐ1通」送る方針なので、11R確定時点で出ていなければ待たずに送る。
+EXHIBITION_WAIT_MIN = 0    # 展示タイムを待つ上限（分）。0なら待たない
 STATE_PATH = os.path.join(HERE, "line_notify_state.json")  # PC実行時の送信済み記録
 
 
@@ -471,14 +474,20 @@ def main():
             log(f"まだ早い（11R締切 {fmt_time(d11)} の{WAIT_BEFORE_11R_MIN}分前から待機）: 終了")
             return
 
-    # 2. 11R結果を待つ
+    # 2. 11R結果を待つ（待っている間に、先に取れるもの＝10R結果・12R出走表を取っておく）
     loop_limit = (t12 + timedelta(minutes=5)) if t12 else (datetime.now(JST) + timedelta(minutes=75))
+    r10 = {}
+    racers = {}
     r11 = {}
     r11_pay = ""
     while True:
         r11, r11_pay = parse_raceresult(fetch_html(url_for("raceresult", 11, date)))
         if r11.get("1"):
             break
+        if not r10:
+            r10, _ = parse_raceresult(fetch_html(url_for("raceresult", 10, date)))
+        if not racers:
+            racers = parse_racelist(fetch_html(url_for("racelist", 12, date)))
         if force and date != now.strftime("%Y%m%d"):
             log("過去日の結果が取れない: 終了")
             return
@@ -515,33 +524,48 @@ def main():
 
     a, b = r11.get("2", ""), r11.get("3", "")
 
-    # 3. 判定材料
-    r10, _ = parse_raceresult(fetch_html(url_for("raceresult", 10, date)))
+    # 3. 判定材料（残りは並列で一気に取る）
+    def fetch_rest():
+        jobs = {
+            "before12": lambda: parse_beforeinfo(fetch_html(url_for("beforeinfo", 12, date))),
+            "before11": lambda: parse_beforeinfo(fetch_html(url_for("beforeinfo", 11, date))),
+            "odds": lambda: parse_odds3t(fetch_html(url_for("odds3t", 12, date))),
+        }
+        if not r10:
+            jobs["r10"] = lambda: parse_raceresult(fetch_html(url_for("raceresult", 10, date)))
+        if not racers:
+            jobs["racers"] = lambda: parse_racelist(fetch_html(url_for("racelist", 12, date)))
+        with ThreadPoolExecutor(max_workers=len(jobs)) as ex_:
+            futs = {k: ex_.submit(f) for k, f in jobs.items()}
+            return {k: f.result() for k, f in futs.items()}
+
+    got = fetch_rest()
+    if "r10" in got:
+        r10 = got["r10"][0]
+    if "racers" in got:
+        racers = got["racers"]
     same3 = bool(r10) and all(r10.get(k) == r11.get(k) for k in ("1", "2", "3"))
-    racers = parse_racelist(fetch_html(url_for("racelist", 12, date)))
+    ex, weather = got["before12"]
+    weather_note = ""
+    if not weather.get("天気"):
+        # 12Rの直前情報がまだ出ていなければ、11Rの気象を使う
+        weather = got["before11"][1]
+        weather_note = "（11R時点）"
+    odds = got["odds"]
 
-    # 展示タイムは12Rの展示航走後に出るので、少し待つ
+    # 展示タイムは任意で少しだけ待てる（既定は待たない）
     ex_deadline = found_at + timedelta(minutes=EXHIBITION_WAIT_MIN)
-    if t12:
-        ex_deadline = min(ex_deadline, t12 - timedelta(minutes=SEND_MARGIN_MIN))
-    while True:
-        ex, weather = parse_beforeinfo(fetch_html(url_for("beforeinfo", 12, date)))
-        have = sum(1 for v in ex.values() if v)
-        if have >= 6 or (force and date != now.strftime("%Y%m%d")):
+    while EXHIBITION_WAIT_MIN > 0 and sum(1 for v in ex.values() if v) < 6:
+        if datetime.now(JST) >= ex_deadline or (force and date != now.strftime("%Y%m%d")):
             break
-        if datetime.now(JST) >= ex_deadline:
-            log(f"展示タイム待ちを打ち切り（{have}艇分）")
-            break
-        log(f"展示タイム待ち（{have}/6艇）")
         time.sleep(POLL_SEC)
-
-    odds = parse_odds3t(fetch_html(url_for("odds3t", 12, date)))
+        ex, _w = parse_beforeinfo(fetch_html(url_for("beforeinfo", 12, date)))
     odds_time = datetime.now(JST).strftime("%H:%M")
 
     # 4. 見送り判定
     checks, skip = [], []
     wtxt = weather.get("天気", "")
-    detail = f"{wtxt or '不明'} 風{weather.get('風速') or '?'}m 波{weather.get('波高') or '?'}cm"
+    detail = f"{wtxt or '不明'} 風{weather.get('風速') or '?'}m 波{weather.get('波高') or '?'}cm{weather_note}"
     rain = "雨" in wtxt or "雪" in wtxt
     checks.append(("天気", not rain, detail))
     if rain:
@@ -566,7 +590,7 @@ def main():
         if not ok:
             skip.append("展示4位以下")
     else:
-        checks.append(("1号艇展示", True, "未発表（締切前に直前情報で確認を）"))
+        checks.append(("1号艇展示", True, "未発表→締切10分前ごろ直前情報で確認。4位以下なら見送り"))
 
     note2 = ""
     if same3:
