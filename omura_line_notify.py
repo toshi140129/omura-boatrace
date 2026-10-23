@@ -162,29 +162,42 @@ def parse_event_type(deadlines):
 
 # ---------------------------------------------------------------- 結果
 def parse_raceresult(html):
-    """({着順: 艇番}, 3連単払戻)"""
+    """({着順: 艇番}, 3連単払戻)
+
+    結果掲載直後は「払戻金」表だけが先に出て着順表が無いことがあるので、
+    まず3連単の払戻行（例 1 - 3 - 5）から1〜3着を読み、無ければ着順表を読む。
+    """
     if no_data(html):
         return ({}, "")
     soup = BeautifulSoup(html, "html.parser")
     tables = soup.select("table.is-w495")
     places = {}
     pay = ""
-    if tables:
-        for tr in tables[0].select("tbody tr"):
-            tds = tr.find_all("td")
-            if len(tds) >= 2:
-                rnk = nfkc(tds[0].get_text(strip=True))
-                boat = first_num(tds[1].get_text(), r"\d")
-                if rnk in ("1", "2", "3", "4", "5", "6") and boat:
-                    places[rnk] = boat
     for table in tables:
         for tr in table.select("tbody tr"):
             tds = tr.find_all("td")
             if len(tds) >= 3 and "3連単" in tds[0].get_text():
+                combo = re.findall(r"\d", nfkc(tds[1].get_text()))
+                if len(combo) == 3:
+                    places = {"1": combo[0], "2": combo[1], "3": combo[2]}
                 pay = nfkc(tds[2].get_text(strip=True)).replace("¥", "").replace(",", "").replace("円", "")
                 break
         if pay:
             break
+    if not places:
+        for table in tables:
+            rows = {}
+            for tr in table.select("tbody tr"):
+                tds = tr.find_all("td")
+                if len(tds) < 2:
+                    continue
+                rnk = nfkc(tds[0].get_text(strip=True))
+                boat = nfkc(tds[1].get_text(strip=True))
+                if re.fullmatch(r"[1-6]", rnk) and re.fullmatch(r"[1-6]", boat):
+                    rows[rnk] = boat
+            if all(k in rows for k in ("1", "2", "3")):
+                places = rows
+                break
     return (places, pay)
 
 
