@@ -460,6 +460,29 @@ def main():
         log(f"開催あり {parse_event_type(deadlines)}  11R締切 {fmt_time(d11)}  12R締切 {fmt_time(d12)}")
     event_type = parse_event_type(deadlines)
 
+    if env.get("NOTIFY_PREVIEW", "") in ("1", "true", "True"):
+        # 11Rを待たずに「今取れるもの」を全部表示して終わる（手動確認用）
+        def _f(rno, page):
+            return fetch_html(url_for(page, rno, date))
+        with ThreadPoolExecutor(max_workers=6) as ex_:
+            f10 = ex_.submit(_f, 10, "raceresult")
+            f11 = ex_.submit(_f, 11, "raceresult")
+            fr = ex_.submit(_f, 12, "racelist")
+            fb12 = ex_.submit(_f, 12, "beforeinfo")
+            fb11 = ex_.submit(_f, 11, "beforeinfo")
+            fo = ex_.submit(_f, 12, "odds3t")
+        r10p, p10 = parse_raceresult(f10.result())
+        r11p, p11 = parse_raceresult(f11.result())
+        print("PREVIEW_JSON " + json.dumps({
+            "deadlines": deadlines, "event_type": event_type,
+            "r10": r10p, "r10_pay": p10, "r11": r11p, "r11_pay": p11,
+            "racers12": parse_racelist(fr.result()),
+            "before12": parse_beforeinfo(fb12.result()),
+            "before11": parse_beforeinfo(fb11.result()),
+            "odds12": parse_odds3t(fo.result()),
+        }, ensure_ascii=False), flush=True)
+        return
+
     def at(hm):
         return day.replace(hour=hm[0], minute=hm[1], second=0) if hm else None
 
