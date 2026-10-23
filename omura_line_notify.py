@@ -212,10 +212,13 @@ def parse_racelist(html):
         name = nfkc(a.get_text(" ", strip=True)).replace(" ", "") if a else ""
         vals = [first_num(t) for t in lines(tds[4])]
         vals = [v for v in vals if v != ""]
+        lvals = [first_num(t) for t in lines(tds[5])] if len(tds) > 5 else []
+        lvals = [v for v in lvals if v != ""]
         boats[waku] = {
             "選手名": name,
             "級別": m.group(1) if m else "",
             "全国勝率": vals[0] if vals else "",
+            "当地勝率": lvals[0] if lvals else "",
         }
     return boats
 
@@ -467,15 +470,18 @@ def main():
         with ThreadPoolExecutor(max_workers=6) as ex_:
             f10 = ex_.submit(_f, 10, "raceresult")
             f11 = ex_.submit(_f, 11, "raceresult")
+            f12 = ex_.submit(_f, 12, "raceresult")
             fr = ex_.submit(_f, 12, "racelist")
             fb12 = ex_.submit(_f, 12, "beforeinfo")
             fb11 = ex_.submit(_f, 11, "beforeinfo")
             fo = ex_.submit(_f, 12, "odds3t")
         r10p, p10 = parse_raceresult(f10.result())
         r11p, p11 = parse_raceresult(f11.result())
+        r12p, p12 = parse_raceresult(f12.result())
         print("PREVIEW_JSON " + json.dumps({
             "deadlines": deadlines, "event_type": event_type,
             "r10": r10p, "r10_pay": p10, "r11": r11p, "r11_pay": p11,
+            "r12": r12p, "r12_pay": p12,
             "racers12": parse_racelist(fr.result()),
             "before12": parse_beforeinfo(fb12.result()),
             "before11": parse_beforeinfo(fb11.result()),
