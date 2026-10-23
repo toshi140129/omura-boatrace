@@ -475,13 +475,21 @@ def main():
             fb12 = ex_.submit(_f, 12, "beforeinfo")
             fb11 = ex_.submit(_f, 11, "beforeinfo")
             fo = ex_.submit(_f, 12, "odds3t")
-        r10p, p10 = parse_raceresult(f10.result())
+        h10 = f10.result()
+        r10p, p10 = parse_raceresult(h10)
+        raw_rows = []
+        try:
+            for i, tb in enumerate(BeautifulSoup(h10, "html.parser").select("table.is-w495")[:2]):
+                for tr in tb.select("tbody tr"):
+                    raw_rows.append(f"t{i}: " + " | ".join(nfkc(td.get_text(' ', strip=True)) for td in tr.find_all("td")))
+        except Exception as e:
+            raw_rows.append(f"ERR {e}")
         r11p, p11 = parse_raceresult(f11.result())
         r12p, p12 = parse_raceresult(f12.result())
         print("PREVIEW_JSON " + json.dumps({
             "deadlines": deadlines, "event_type": event_type,
             "r10": r10p, "r10_pay": p10, "r11": r11p, "r11_pay": p11,
-            "r12": r12p, "r12_pay": p12,
+            "r12": r12p, "r12_pay": p12, "r10_rows": raw_rows,
             "racers12": parse_racelist(fr.result()),
             "before12": parse_beforeinfo(fb12.result()),
             "before11": parse_beforeinfo(fb11.result()),
