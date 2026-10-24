@@ -20,9 +20,13 @@ on:
         description: "LINEに送らず本文をログに出すだけ"
         type: boolean
         default: true
+      preview:
+        description: "11Rを待たず今取れる情報だけ表示して終わる"
+        type: boolean
+        default: false
 
 concurrency:
-  group: line-notify
+  group: line-notify-${{ github.ref_name }}-${{ inputs.preview && 'preview' || 'main' }}
   cancel-in-progress: false
 
 permissions:
@@ -65,6 +69,7 @@ jobs:
           NOTIFY_DATE: ${{ steps.today.outputs.date }}
           NOTIFY_FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force && '1' || '' }}
           NOTIFY_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '' }}
+          NOTIFY_PREVIEW: ${{ github.event_name == 'workflow_dispatch' && inputs.preview && '1' || '' }}
         run: python omura_line_notify.py
 
       - name: 本日分を処理済みとして記録

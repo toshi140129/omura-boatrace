@@ -162,29 +162,42 @@ def parse_event_type(deadlines):
 
 # ---------------------------------------------------------------- 結果
 def parse_raceresult(html):
-    """({着順: 艇番}, 3連単払戻)"""
+    """({着順: 艇番}, 3連単払戻)
+
+    結果掲載直後は「払戻金」表だけが先に出て着順表が無いことがあるので、
+    まず3連単の払戻行（例 1 - 3 - 5）から1〜3着を読み、無ければ着順表を読む。
+    """
     if no_data(html):
         return ({}, "")
     soup = BeautifulSoup(html, "html.parser")
     tables = soup.select("table.is-w495")
     places = {}
     pay = ""
-    if tables:
-        for tr in tables[0].select("tbody tr"):
-            tds = tr.find_all("td")
-            if len(tds) >= 2:
-                rnk = nfkc(tds[0].get_text(strip=True))
-                boat = first_num(tds[1].get_text(), r"\d")
-                if rnk in ("1", "2", "3", "4", "5", "6") and boat:
-                    places[rnk] = boat
     for table in tables:
         for tr in table.select("tbody tr"):
             tds = tr.find_all("td")
             if len(tds) >= 3 and "3連単" in tds[0].get_text():
+                combo = re.findall(r"\d", nfkc(tds[1].get_text()))
+                if len(combo) == 3:
+                    places = {"1": combo[0], "2": combo[1], "3": combo[2]}
                 pay = nfkc(tds[2].get_text(strip=True)).replace("¥", "").replace(",", "").replace("円", "")
                 break
         if pay:
             break
+    if not places:
+        for table in tables:
+            rows = {}
+            for tr in table.select("tbody tr"):
+                tds = tr.find_all("td")
+                if len(tds) < 2:
+                    continue
+                rnk = nfkc(tds[0].get_text(strip=True))
+                boat = nfkc(tds[1].get_text(strip=True))
+                if re.fullmatch(r"[1-6]", rnk) and re.fullmatch(r"[1-6]", boat):
+                    rows[rnk] = boat
+            if all(k in rows for k in ("1", "2", "3")):
+                places = rows
+                break
     return (places, pay)
 
 
@@ -212,10 +225,13 @@ def parse_racelist(html):
         name = nfkc(a.get_text(" ", strip=True)).replace(" ", "") if a else ""
         vals = [first_num(t) for t in lines(tds[4])]
         vals = [v for v in vals if v != ""]
+        lvals = [first_num(t) for t in lines(tds[5])] if len(tds) > 5 else []
+        lvals = [v for v in lvals if v != ""]
         boats[waku] = {
             "選手名": name,
             "級別": m.group(1) if m else "",
             "全国勝率": vals[0] if vals else "",
+            "当地勝率": lvals[0] if lvals else "",
         }
     return boats
 
@@ -459,6 +475,40 @@ def main():
         d11, d12 = deadlines[10], deadlines[11]
         log(f"開催あり {parse_event_type(deadlines)}  11R締切 {fmt_time(d11)}  12R締切 {fmt_time(d12)}")
     event_type = parse_event_type(deadlines)
+
+    if env.get("NOTIFY_PREVIEW", "") in ("1", "true", "True"):
+        # 11Rを待たずに「今取れるもの」を全部表示して終わる（手動確認用）
+        def _f(rno, page):
+            return fetch_html(url_for(page, rno, date))
+        with ThreadPoolExecutor(max_workers=6) as ex_:
+            f10 = ex_.submit(_f, 10, "raceresult")
+            f11 = ex_.submit(_f, 11, "raceresult")
+            f12 = ex_.submit(_f, 12, "raceresult")
+            fr = ex_.submit(_f, 12, "racelist")
+            fb12 = ex_.submit(_f, 12, "beforeinfo")
+            fb11 = ex_.submit(_f, 11, "beforeinfo")
+            fo = ex_.submit(_f, 12, "odds3t")
+        h10 = f10.result()
+        r10p, p10 = parse_raceresult(h10)
+        raw_rows = []
+        try:
+            for i, tb in enumerate(BeautifulSoup(h10, "html.parser").select("table.is-w495")[:2]):
+                for tr in tb.select("tbody tr"):
+                    raw_rows.append(f"t{i}: " + " | ".join(nfkc(td.get_text(' ', strip=True)) for td in tr.find_all("td")))
+        except Exception as e:
+            raw_rows.append(f"ERR {e}")
+        r11p, p11 = parse_raceresult(f11.result())
+        r12p, p12 = parse_raceresult(f12.result())
+        print("PREVIEW_JSON " + json.dumps({
+            "deadlines": deadlines, "event_type": event_type,
+            "r10": r10p, "r10_pay": p10, "r11": r11p, "r11_pay": p11,
+            "r12": r12p, "r12_pay": p12, "r10_rows": raw_rows,
+            "racers12": parse_racelist(fr.result()),
+            "before12": parse_beforeinfo(fb12.result()),
+            "before11": parse_beforeinfo(fb11.result()),
+            "odds12": parse_odds3t(fo.result()),
+        }, ensure_ascii=False), flush=True)
+        return
 
     def at(hm):
         return day.replace(hour=hm[0], minute=hm[1], second=0) if hm else None
