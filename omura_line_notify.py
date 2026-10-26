@@ -21,7 +21,8 @@ GitHub Actions（.github/workflows/line_notify.yml）から15分おきに起動�
   NOTIFY_FORCE               1 なら時間帯チェックを無視して即実行（テスト用）
   NOTIFY_DRY_RUN             1 ならLINEに送らず本文を表示するだけ
   NOTIFY_QUIET_DAYS          1 なら「11R 1着≠1号艇」の日も一言だけ送る（既定は送らない）
-  NOTIFY_BUDGET              配分する総額（既定 10000）
+  NOTIFY_BUDGET              賭け金（既定 20000）。BET_MODE=favorite なら1番人気1点に定額、main なら買い目に配分
+  NOTIFY_BET_MODE            favorite（既定。12R 3連単1番人気を1点定額）/ main（1-A-全 等の40倍未満に資金配分）
   GITHUB_OUTPUT              Actions が渡す。done=true を書き出して当日の処理完了を記録する
 
 PCで動かす場合は、このファイルと同じフォルダの .env、無ければ隣の kojima-boatrace\\.env
@@ -46,7 +47,9 @@ JYOJO = "24"  # 大村
 BASE = "https://www.boatrace.jp/owpc/pc/race/"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-ODDS_MAX = 40.0            # これ未満のオッズだけ買う
+ODDS_MAX = 40.0            # main モードで買うオッズの上限（これ未満）
+BET_MODE_DEFAULT = "favorite"  # favorite: 1番人気1点を定額 / main: 1-A-全 等に資金配分
+BUDGET_DEFAULT = 20000
 WAIT_BEFORE_11R_MIN = 40   # 11R締切の何分前から待機を始めるか
 POLL_SEC = 20              # 11R結果の確認間隔（秒）
 # 12Rの展示タイムは12Rの展示航走後（締切10分前ごろ）に出るため、待つと通知が遅れる。
@@ -390,19 +393,34 @@ def build_message(ctx):
     L.append(f"11R結果 {r11['1']}-{r11['2']}-{r11['3']}"
              + (f"（{int(ctx['r11_pay']):,}円）" if ctx["r11_pay"].isdigit() else "")
              + " → 条件①成立")
-    L.append(f"A={ctx['a']} B={ctx['b']}  12R締切 {fmt_time(ctx['d12'])}")
+    if ctx["bet_mode"] == "favorite":
+        L.append(f"12R締切 {fmt_time(ctx['d12'])}")
+    else:
+        L.append(f"A={ctx['a']} B={ctx['b']}  12R締切 {fmt_time(ctx['d12'])}")
     L.append("")
     L.append("■見送りチェック")
     for label, ok, detail in ctx["checks"]:
         L.append(f"{'OK' if ok else 'NG'} {label}: {detail}")
     L.append("")
     if ctx["skip_reasons"]:
-        L.append("判定: △ 見送り推奨（" + "・".join(ctx["skip_reasons"]) + "）")
+        L.append("判定: △ 見送り（" + "・".join(ctx["skip_reasons"]) + "）")
     else:
         L.append("判定: ◎ 買い（見送り条件なし）")
     if ctx["note2"]:
         L.append(ctx["note2"])
     L.append("")
+    if ctx["bet_mode"] == "favorite":
+        fav = ctx["favorites"]
+        if fav:
+            c, o = fav[0]
+            L.append(f"■買い目: 3連単 {c}（1番人気 {o:.1f}倍）× {ctx['budget']:,}円"
+                     f" → 的中時 {int(ctx['budget'] * o):,}円")
+            if len(fav) > 1:
+                L.append("参考: " + "  ".join(f"{i+2}番人気 {c2}({o2:.1f})" for i, (c2, o2) in enumerate(fav[1:3])))
+            L.append(f"※オッズは{ctx['odds_time']}時点。締切直前に1番人気が入れ替わっていたらその時の1番人気を買う")
+        elif ctx["odds_missing"]:
+            L.append("■買い目: 12Rオッズを取得できませんでした（boatrace.jpで1番人気を確認してください）")
+        return "\n".join(L)
     if ctx["alloc"]:
         L.append(f"■買い目 {len(ctx['alloc'])}点 {ODDS_MAX:.0f}倍未満（{ctx['odds_time']}時点）")
         for c, o, yen in ctx["alloc"]:
@@ -451,7 +469,10 @@ def main():
     force = env.get("NOTIFY_FORCE", "") in ("1", "true", "True")
     dry = env.get("NOTIFY_DRY_RUN", "") in ("1", "true", "True")
     quiet_days = env.get("NOTIFY_QUIET_DAYS", "") in ("1", "true", "True")
-    budget = int(env.get("NOTIFY_BUDGET") or 10000)
+    budget = int(env.get("NOTIFY_BUDGET") or BUDGET_DEFAULT)
+    bet_mode = (env.get("NOTIFY_BET_MODE") or BET_MODE_DEFAULT).strip().lower()
+    if bet_mode not in ("favorite", "main"):
+        bet_mode = BET_MODE_DEFAULT
     day = datetime.strptime(date, "%Y%m%d").replace(tzinfo=JST)
 
     if pc_state().get("done_date") == date:
@@ -643,8 +664,19 @@ def main():
         checks.append(("1号艇展示", True, "未発表→締切10分前ごろ直前情報で確認。4位以下なら見送り"))
 
     note2 = ""
-    if same3:
-        note2 = f"※②注意: 10Rと11Rの3着順が完全一致（{r10['1']}-{r10['2']}-{r10['3']}）"
+    if r10:
+        c2detail = f"10R {r10['1']}-{r10['2']}-{r10['3']} / 11R {r11['1']}-{r11['2']}-{r11['3']}"
+        checks.insert(0, ("②着順不一致", not same3, c2detail + ("（完全一致）" if same3 else "")))
+        if same3:
+            if bet_mode == "favorite":
+                skip.append("②不成立")
+            else:
+                note2 = f"※②注意: 10Rと11Rの3着順が完全一致（{r10['1']}-{r10['2']}-{r10['3']}）"
+    else:
+        checks.insert(0, ("②着順不一致", True, "10R結果を取得できず"))
+
+    # 1番人気（オッズ最小）上位3つ
+    favorites = sorted(((c, o) for c, o in odds.items() if o is not None), key=lambda x: x[1])[:3]
 
     # 5. 買い目
     buys, dropped = [], []
@@ -665,6 +697,7 @@ def main():
         "checks": checks, "skip_reasons": skip, "note2": note2,
         "alloc": alloc, "synth": synth, "odds_time": odds_time,
         "odds_missing": not odds, "dropped": dropped,
+        "bet_mode": bet_mode, "budget": budget, "favorites": favorites,
     }
     text = build_message(ctx)
     ok = send(text)
