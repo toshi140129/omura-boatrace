@@ -417,12 +417,15 @@ def build_message(ctx):
                      f" → 的中時 {int(ctx['budget'] * o):,}円")
             if len(fav) > 1:
                 L.append("参考: " + "  ".join(f"{i+2}番人気 {c2}({o2:.1f})" for i, (c2, o2) in enumerate(fav[1:3])))
-            L.append(f"※オッズは{ctx['odds_time']}時点。締切直前に1番人気が入れ替わっていたらその時の1番人気を買う")
+            if ctx["odds_final"]:
+                L.append("※過去日のテスト送信のため確定オッズ（締切後）を表示")
+            else:
+                L.append(f"※オッズは{ctx['odds_time']}時点。締切直前に1番人気が入れ替わっていたらその時の1番人気を買う")
         elif ctx["odds_missing"]:
             L.append("■買い目: 12Rオッズを取得できませんでした（boatrace.jpで1番人気を確認してください）")
         return "\n".join(L)
     if ctx["alloc"]:
-        L.append(f"■買い目 {len(ctx['alloc'])}点 {ODDS_MAX:.0f}倍未満（{ctx['odds_time']}時点）")
+        L.append(f"■買い目 {len(ctx['alloc'])}点 {ODDS_MAX:.0f}倍未満（{'確定オッズ' if ctx['odds_final'] else ctx['odds_time'] + '時点'}）")
         for c, o, yen in ctx["alloc"]:
             L.append(f"{c}  {o:.1f}倍  {yen:,}円")
         total = sum(y for _, _, y in ctx["alloc"])
@@ -632,6 +635,8 @@ def main():
         time.sleep(POLL_SEC)
         ex, _w = parse_beforeinfo(fetch_html(url_for("beforeinfo", 12, date)))
     odds_time = datetime.now(JST).strftime("%H:%M")
+    # 締切後に取ったオッズ（過去日のテスト）は確定オッズなので、時刻ではなくそう表示する
+    odds_final = bool(t12) and datetime.now(JST) > t12
 
     # 4. 見送り判定
     checks, skip = [], []
@@ -695,7 +700,7 @@ def main():
         "date": date, "weekday": day.weekday(), "event_type": event_type,
         "r11": r11, "r11_pay": r11_pay, "a": a, "b": b, "d12": d12,
         "checks": checks, "skip_reasons": skip, "note2": note2,
-        "alloc": alloc, "synth": synth, "odds_time": odds_time,
+        "alloc": alloc, "synth": synth, "odds_time": odds_time, "odds_final": odds_final,
         "odds_missing": not odds, "dropped": dropped,
         "bet_mode": bet_mode, "budget": budget, "favorites": favorites,
     }
