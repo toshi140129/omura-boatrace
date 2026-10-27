@@ -24,6 +24,10 @@ GitHub Actions（.github/workflows/line_notify.yml）から15分おきに起動�
   NOTIFY_BUDGET              賭け金（既定 20000）。BET_MODE=favorite なら1番人気1点に定額、main なら買い目に配分
   NOTIFY_BET_MODE            favorite（既定。12R 3連単1番人気を1点定額）/ main（1-A-全 等の40倍未満に資金配分）
   GITHUB_OUTPUT              Actions が渡す。done=true を書き出して当日の処理完了を記録する
+  NOTIFY_SHARED_STATE        1 なら GitHub の notify-state ブランチにある送信済み記録を使う
+                             （GitHub Actions と PC の両方で動かしても1日1通にするため。送信前に確認し、送信後に書き込む）
+  NOTIFY_SEND_DELAY_SEC      11R確定後、送信前に待つ秒数（既定 0）。PC側を 90 にしておくと、
+                             GitHub Actions が先に送っていればそれを見て送らずに終わる
 
 PCで動かす場合は、このファイルと同じフォルダの .env、無ければ隣の kojima-boatrace\\.env
 （児島版のLINE設定）を読む。
@@ -31,6 +35,7 @@ PCで動かす場合は、このファイルと同じフォルダの .env、無�
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import unicodedata
@@ -257,12 +262,35 @@ def parse_weather(soup):
     return out
 
 
+BEFORE_EXTRA = {}  # 直前情報の追加項目（チルト・スタート展示の進入）。parse_beforeinfo が rno に関係なく最後に読んだものを置く
+
+
+def parse_start_exhibition(soup):
+    """スタート展示の進入順 [艇番, ...]（コース1から）。読めなければ []"""
+    try:
+        for tbl in soup.select("table"):
+            head = nfkc(tbl.get_text(" ", strip=True))
+            if "スタート展示" not in head and "展示" not in head:
+                continue
+            order = []
+            for span in tbl.select("span.table1_boatImage1Number"):
+                n = first_num(span.get_text(), r"[1-6]")
+                if n:
+                    order.append(n)
+            if len(order) >= 5:
+                return order
+    except Exception:
+        pass
+    return []
+
+
 def parse_beforeinfo(html):
-    """({枠: 展示タイム}, 天気dict)"""
+    """({枠: 展示タイム}, 天気dict)。チルトと進入は BEFORE_EXTRA にも入れる"""
     if no_data(html):
         return ({}, {"天気": "", "風速": "", "波高": ""})
     soup = BeautifulSoup(html, "html.parser")
     ex = {}
+    tilt = {}
     for tb in soup.select("tbody.is-fs12"):
         trs = tb.find_all("tr")
         if not trs:
@@ -273,6 +301,9 @@ def parse_beforeinfo(html):
         waku = first_num(tds[0].get_text(), r"\d")
         if waku:
             ex[waku] = first_num(tds[4].get_text(), r"\d\.\d{2}")
+            tilt[waku] = first_num(tds[5].get_text(), r"-?\d+(?:\.\d+)?")
+    if ex:
+        BEFORE_EXTRA[len(BEFORE_EXTRA)] = {"tilt": tilt, "start": parse_start_exhibition(soup)}
     return (ex, parse_weather(soup))
 
 
@@ -465,6 +496,62 @@ def pc_mark_done(date):
         json.dump({"done_date": date}, f)
 
 
+# ---------------------------------------------------------------- 送信済み記録の共有（GitHub の notify-state ブランチ）
+SHARED_BRANCH = "notify-state"
+
+
+def _git(*args, check=True):
+    return subprocess.run(["git", "-C", HERE, *args], capture_output=True, text=True, check=check)
+
+
+def shared_marker_exists(date):
+    """notify-state ブランチに sent/<date>.txt があれば True（git が無い・取れないときは False）"""
+    try:
+        if _git("fetch", "--quiet", "origin", SHARED_BRANCH, check=False).returncode != 0:
+            return False  # ブランチがまだ無い（初回）か、ネットワーク不調
+        r = _git("cat-file", "-e", f"FETCH_HEAD:sent/{date}.txt", check=False)
+        return r.returncode == 0
+    except Exception as e:
+        log(f"送信済み記録の確認に失敗（無視して続行）: {e}")
+        return False
+
+
+def shared_marker_write(date, who):
+    """notify-state ブランチに sent/<date>.txt を追加して push（失敗しても通知自体には影響させない）"""
+    try:
+        content = f"{who} {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}\n"
+        blob = subprocess.run(["git", "-C", HERE, "hash-object", "-w", "--stdin"], input=content,
+                              capture_output=True, text=True, check=True).stdout.strip()
+        have_remote = _git("fetch", "--quiet", "origin", SHARED_BRANCH, check=False).returncode == 0
+        entries = []
+        parent = []
+        if have_remote:
+            parent = ["-p", "FETCH_HEAD"]
+            ls = _git("ls-tree", "FETCH_HEAD", "sent/", check=False).stdout
+            for line in ls.splitlines():
+                # "100644 blob <sha>\tsent/x.txt"
+                meta, path = line.split("\t", 1)
+                if path != f"sent/{date}.txt":
+                    entries.append(line)
+        entries.append(f"100644 blob {blob}\tsent/{date}.txt")
+        # sent/ 以下を1つのツリーにして、その上にルートツリーを作る
+        sub = subprocess.run(["git", "-C", HERE, "mktree"], input="\n".join(
+            e.replace("\tsent/", "\t") for e in entries) + "\n", capture_output=True, text=True, check=True).stdout.strip()
+        root = subprocess.run(["git", "-C", HERE, "mktree"], input=f"040000 tree {sub}\tsent\n",
+                              capture_output=True, text=True, check=True).stdout.strip()
+        env = dict(os.environ, GIT_AUTHOR_NAME="omura-line-notify", GIT_AUTHOR_EMAIL="noreply@example.com",
+                   GIT_COMMITTER_NAME="omura-line-notify", GIT_COMMITTER_EMAIL="noreply@example.com")
+        commit = subprocess.run(["git", "-C", HERE, "commit-tree", root, *parent, "-m", f"sent {date} by {who}"],
+                                capture_output=True, text=True, check=True, env=env).stdout.strip()
+        r = _git("push", "--quiet", "origin", f"{commit}:refs/heads/{SHARED_BRANCH}", check=False)
+        if r.returncode != 0:
+            log(f"送信済み記録の push に失敗: {r.stderr.strip()[:200]}")
+        else:
+            log("送信済み記録を notify-state に書き込み")
+    except Exception as e:
+        log(f"送信済み記録の書き込みに失敗（無視）: {e}")
+
+
 def main():
     env = load_env()
     now = datetime.now(JST)
@@ -474,12 +561,20 @@ def main():
     quiet_days = env.get("NOTIFY_QUIET_DAYS", "") in ("1", "true", "True")
     budget = int(env.get("NOTIFY_BUDGET") or BUDGET_DEFAULT)
     bet_mode = (env.get("NOTIFY_BET_MODE") or BET_MODE_DEFAULT).strip().lower()
+    shared = env.get("NOTIFY_SHARED_STATE", "") in ("1", "true", "True")
+    send_delay = int(env.get("NOTIFY_SEND_DELAY_SEC") or 0)
+    who = "github" if os.environ.get("GITHUB_ACTIONS") else "pc"
     if bet_mode not in ("favorite", "main"):
         bet_mode = BET_MODE_DEFAULT
     day = datetime.strptime(date, "%Y%m%d").replace(tzinfo=JST)
 
     if pc_state().get("done_date") == date:
         log("本日は処理済み（PC側の記録）: 終了")
+        return
+    if shared and not force and shared_marker_exists(date):
+        log("本日は送信済み（notify-state の記録）: 終了")
+        mark_done()
+        pc_mark_done(date)
         return
 
     log(f"対象日 {date}  現在 {now.strftime('%H:%M')}  force={force} dry={dry}")
@@ -529,6 +624,7 @@ def main():
             "r12": r12p, "r12_pay": p12, "r10_rows": raw_rows,
             "racers12": parse_racelist(fr.result()),
             "before12": parse_beforeinfo(fb12.result()),
+            "before12_extra": (BEFORE_EXTRA.get(max(BEFORE_EXTRA)) if BEFORE_EXTRA else {}),
             "before11": parse_beforeinfo(fb11.result()),
             "odds12": parse_odds3t(fo.result()),
         }, ensure_ascii=False), flush=True)
@@ -668,6 +764,43 @@ def main():
     else:
         checks.append(("1号艇展示", True, "未発表→締切10分前ごろ直前情報で確認。4位以下なら見送り"))
 
+    # チルト（1号艇以外に0.5以上 / 1号艇自身が0.5以上）とスタート展示の進入（枠なりでない）
+    extra12 = {}
+    try:
+        _b12 = parse_beforeinfo(fetch_html(url_for("beforeinfo", 12, date)))
+        if _b12[0] and BEFORE_EXTRA:
+            extra12 = BEFORE_EXTRA.get(max(BEFORE_EXTRA)) or {}
+    except Exception:
+        extra12 = {}
+    tilts = {}
+    for k, v in (extra12.get("tilt") or {}).items():
+        try:
+            tilts[k] = float(v)
+        except (TypeError, ValueError):
+            pass
+    if tilts:
+        up = [k for k, v in tilts.items() if k != "1" and v >= 0.5]
+        ok = not up
+        detail = " ".join(f"{k}号{tilts[k]:+.1f}" for k in sorted(tilts))
+        checks.append(("他艇チルト", ok, detail + ("" if ok else f"（{'・'.join(up)}号艇が0.5以上）")))
+        if not ok:
+            skip.append("他艇チルト0.5以上")
+        if "1" in tilts:
+            ok1 = tilts["1"] < 0.5
+            checks.append(("1号艇チルト", ok1, f"{tilts['1']:+.1f}"))
+            if not ok1:
+                skip.append("1号艇チルト0.5以上")
+    else:
+        checks.append(("チルト", True, "未発表→直前情報で確認。1号艇以外に0.5以上がいれば見送り"))
+    start = extra12.get("start") or []
+    if start:
+        ok = start == [str(i) for i in range(1, len(start) + 1)]
+        checks.append(("展示進入", ok, "-".join(start) + ("" if ok else "（枠なりでない）")))
+        if not ok:
+            skip.append("展示進入")
+    else:
+        checks.append(("展示進入", True, "未発表→直前情報で確認。枠なりでなければ見送り"))
+
     note2 = ""
     if r10:
         c2detail = f"10R {r10['1']}-{r10['2']}-{r10['3']} / 11R {r11['1']}-{r11['2']}-{r11['3']}"
@@ -705,8 +838,20 @@ def main():
         "bet_mode": bet_mode, "budget": budget, "favorites": favorites,
     }
     text = build_message(ctx)
+    if shared and not dry:
+        if send_delay > 0:
+            log(f"送信前に {send_delay} 秒待つ（他方が先に送っていないか確認するため）")
+            time.sleep(send_delay)
+        if shared_marker_exists(date):
+            log("待っている間に他方が送信済み（notify-state の記録）: 送らずに終了")
+            print("----- 送らなかった本文 -----\n" + text + "\n--------------------", flush=True)
+            mark_done()
+            pc_mark_done(date)
+            return
     ok = send(text)
     if ok or dry:
+        if shared and not dry:
+            shared_marker_write(date, who)
         mark_done()
         pc_mark_done(date)
     elif not ok:

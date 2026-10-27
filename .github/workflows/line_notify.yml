@@ -1,11 +1,13 @@
 name: 12R LINE通知
 
-# 日本時間 19:00〜23:45 に15分おきに起動（cron は UTC 表記）。
+# 日本時間 19:00〜23:45 ごろに15分おきに起動（cron は UTC 表記）。
 # 各起動は「まだ早い」「開催なし」「送信済み」なら数十秒で終わり、
 # 11R締切の40分前〜12R締切の間に入った起動だけが結果確定まで待って通知する。
+# GitHub の定時起動は 0分・15分・30分・45分ちょうどだと混雑で数時間遅れたり飛ばされたりする
+# （2026-10-23〜27 は1日1〜2回しか起動せず、どれもレース後だった）ので、半端な分にずらしている。
 on:
   schedule:
-    - cron: "0,15,30,45 10-14 * * *"
+    - cron: "4,19,34,49 10-14 * * *"
   workflow_dispatch:
     inputs:
       date:
@@ -30,7 +32,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write   # notify-state ブランチに送信済み記録を push するため
 
 jobs:
   notify:
@@ -70,6 +72,7 @@ jobs:
           NOTIFY_FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force && '1' || '' }}
           NOTIFY_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '' }}
           NOTIFY_PREVIEW: ${{ github.event_name == 'workflow_dispatch' && inputs.preview && '1' || '' }}
+          NOTIFY_SHARED_STATE: "1"
         run: python omura_line_notify.py
 
       - name: 本日分を処理済みとして記録
