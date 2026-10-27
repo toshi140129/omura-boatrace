@@ -12,8 +12,18 @@ import subprocess
 from datetime import date, datetime, timedelta
 
 import omura_history_fetch as hf
-import omura_extra_fetch as extra
-import omura_tide as tide
+
+# 追加データ・潮位は bs4 などが無くても結果CSVの更新と push だけは止めない
+try:
+    import omura_extra_fetch as extra
+except Exception as _e:  # noqa: BLE001
+    extra = None
+    print(f"omura_extra_fetch を読み込めません（追加データはスキップ）: {_e}")
+try:
+    import omura_tide as tide
+except Exception as _e:  # noqa: BLE001
+    tide = None
+    print(f"omura_tide を読み込めません（潮位はスキップ）: {_e}")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -61,15 +71,17 @@ def main():
     hf.END = yesterday
     hf.main()
     # 追加データ: 結果CSVにある日付のうち未取得分（取得失敗しても結果CSVのpushは行う）
-    try:
-        extra.fetch_dates(extra.results_dates(), label="追加データ取得")
-        extra.build_daily_extra()
-    except Exception as e:
-        print(f"追加データ取得で失敗（結果CSVのみ更新）: {e}")
-    try:
-        tide.build()
-    except Exception as e:
-        print(f"潮位の更新で失敗: {e}")
+    if extra is not None:
+        try:
+            extra.fetch_dates(extra.results_dates(), label="追加データ取得")
+            extra.build_daily_extra()
+        except Exception as e:
+            print(f"追加データ取得で失敗（結果CSVのみ更新）: {e}")
+    if tide is not None:
+        try:
+            tide.build()
+        except Exception as e:
+            print(f"潮位の更新で失敗: {e}")
     git_push()
 
 
