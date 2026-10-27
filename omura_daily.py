@@ -4,13 +4,26 @@ CSV の最終日付の翌日〜昨日までを boatrace.jp から取得して om
 取得処理は omura_history_fetch.py をそのまま使う。
 追加データ（出走表・直前情報・スタート情報・全レース結果・11R/12Rオッズ）は omura_extra_fetch.py で
 同じ日付分を取得し、omura_racers.csv などに追記する。
+支部・部品交換・プロペラ・締切時刻・安定板（omura_racers_extra.csv / omura_race_extra.csv）も同じ取得の中で入り、
+潮位は omura_tide.py が気象庁の推算潮位（長崎）から omura_tide.csv を作り直す。
 """
 import os
 import subprocess
 from datetime import date, datetime, timedelta
 
 import omura_history_fetch as hf
-import omura_extra_fetch as extra
+
+# 追加データ・潮位は bs4 などが無くても結果CSVの更新と push だけは止めない
+try:
+    import omura_extra_fetch as extra
+except Exception as _e:  # noqa: BLE001
+    extra = None
+    print(f"omura_extra_fetch を読み込めません（追加データはスキップ）: {_e}")
+try:
+    import omura_tide as tide
+except Exception as _e:  # noqa: BLE001
+    tide = None
+    print(f"omura_tide を読み込めません（潮位はスキップ）: {_e}")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -25,12 +38,14 @@ def last_date():
 EXTRA_FILES = [
     "omura_racers.csv", "omura_races.csv", "omura_meta.csv",
     "omura_11r_odds.csv", "omura_12r_odds.csv", "omura_daily_extra.csv",
+    "omura_racers_extra.csv", "omura_race_extra.csv", "omura_tide.csv",
 ]
 
 
 def git_push():
     try:
-        subprocess.run(["git", "-C", HERE, "add", "omura_results.csv"] + EXTRA_FILES, check=True)
+        files = [f for f in ["omura_results.csv"] + EXTRA_FILES if os.path.exists(os.path.join(HERE, f))]
+        subprocess.run(["git", "-C", HERE, "add"] + files, check=True)
         diff = subprocess.run(["git", "-C", HERE, "diff", "--cached", "--quiet"])
         if diff.returncode == 0:
             print("変更なし（push不要）")
@@ -56,11 +71,17 @@ def main():
     hf.END = yesterday
     hf.main()
     # 追加データ: 結果CSVにある日付のうち未取得分（取得失敗しても結果CSVのpushは行う）
-    try:
-        extra.fetch_dates(extra.results_dates(), label="追加データ取得")
-        extra.build_daily_extra()
-    except Exception as e:
-        print(f"追加データ取得で失敗（結果CSVのみ更新）: {e}")
+    if extra is not None:
+        try:
+            extra.fetch_dates(extra.results_dates(), label="追加データ取得")
+            extra.build_daily_extra()
+        except Exception as e:
+            print(f"追加データ取得で失敗（結果CSVのみ更新）: {e}")
+    if tide is not None:
+        try:
+            tide.build()
+        except Exception as e:
+            print(f"潮位の更新で失敗: {e}")
     git_push()
 
 
