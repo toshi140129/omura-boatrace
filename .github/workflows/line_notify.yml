@@ -32,7 +32,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write   # notify-state ブランチに送信済み記録を push するため
 
 jobs:
   notify:
@@ -72,6 +72,7 @@ jobs:
           NOTIFY_FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force && '1' || '' }}
           NOTIFY_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '' }}
           NOTIFY_PREVIEW: ${{ github.event_name == 'workflow_dispatch' && inputs.preview && '1' || '' }}
+          NOTIFY_SHARED_STATE: "1"
         run: python omura_line_notify.py
 
       - name: 本日分を処理済みとして記録
