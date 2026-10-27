@@ -13,7 +13,8 @@ omura_results.csv に入っていない「予測の判定材料」を boatrace.j
   omura_11r_odds.csv     11R の3連単確定オッズ120通り（omura_12r_odds.csv と同じ列構成）
   omura_12r_odds.csv     既存ファイル。未取得の日付があれば追記する
   omura_daily_extra.csv  上記から作る 1行=1日 の要約（omura_results.csv と「日付」で結合して分析に使う）
-  omura_racers_extra.csv 1行=1艇。10R/11R/12R の支部・出身地・プロペラ・部品交換（直前情報）と、そのレースの安定板使用（1/0）
+  omura_racers_extra.csv 1行=1艇。10R/11R/12R の支部・出身地・プロペラ・部品交換（直前情報）
+  omura_race_extra.csv   1行=1レース。10R/11R/12R の締切予定時刻と安定板使用（1/0）
 
 使い方
   python omura_extra_fetch.py                  # omura_results.csv の全日付のうち未取得分を取得し、要約CSVを再生成
@@ -48,6 +49,7 @@ ODDS11_CSV = os.path.join(HERE, "omura_11r_odds.csv")
 ODDS12_CSV = os.path.join(HERE, "omura_12r_odds.csv")
 DAILY_EXTRA_CSV = os.path.join(HERE, "omura_daily_extra.csv")
 RACERS_EXTRA_CSV = os.path.join(HERE, "omura_racers_extra.csv")
+RACE_EXTRA_CSV = os.path.join(HERE, "omura_race_extra.csv")
 DEBUG_DIR = os.path.join(HERE, "extra_debug")
 
 JYOJO = "24"
@@ -67,7 +69,8 @@ RACERS_HEADER = [
     "本番進入", "本番ST", "着順",
 ]
 RACES_HEADER = ["日付", "R", "レース種別", "1着", "2着", "3着", "3連単払戻", "決まり手"]
-RACERS_EXTRA_HEADER = ["日付", "R", "枠", "登録番号", "選手名", "支部", "出身地", "プロペラ", "部品交換", "安定板"]
+RACERS_EXTRA_HEADER = ["日付", "R", "枠", "登録番号", "選手名", "支部", "出身地", "プロペラ", "部品交換"]
+RACE_EXTRA_HEADER = ["日付", "R", "締切時刻", "安定板"]
 META_HEADER = ["日付", "節名", "グレード"]
 COMBOS = [f"{a}-{b}-{c}" for a, b, c in permutations(range(1, 7), 3)]
 ODDS_HEADER = ["日付"] + COMBOS
@@ -159,6 +162,19 @@ def parse_stabilizer_flag(soup):
             cls = " ".join(parent.get("class", []))
             return ("1", f"{parent.name}.{cls}:{txt}"[:60])
     return ("0", "")
+
+
+def parse_deadlines(html):
+    """ページ内の 1R〜12R 締切予定時刻 ["HH:MM", ...] を返す（出走表・raceindex のレースタブから）。取れなければ []"""
+    if no_data(html):
+        return []
+    found = [(int(h), int(m)) for h, m in re.findall(r"\b(\d{1,2}):(\d{2})\b", html)]
+    found = [(h, m) for h, m in found if 8 <= h <= 23 and 0 <= m <= 59]
+    for i in range(0, len(found) - 11):
+        seq = found[i:i + 12]
+        if all(10 <= (b[0] * 60 + b[1]) - (a[0] * 60 + a[1]) <= 60 for a, b in zip(seq, seq[1:])):
+            return [f"{h:02d}:{m:02d}" for h, m in seq]
+    return []
 
 
 def parse_racelist(html):
@@ -425,7 +441,7 @@ def fetch_day(date_str, save_html=False):
         for key, html in zip(keys, ex.map(lambda k: get(*k), keys)):
             htmls[key] = html
 
-    day = {"日付": date_str, "races": {}, "racers": {}, "meta": {}, "odds11": {}, "odds12": {}}
+    day = {"日付": date_str, "races": {}, "racers": {}, "race_extra": {}, "meta": {}, "odds11": {}, "odds12": {}}
     for rno in range(1, 13):
         places, pay, rank, kimarite, starts = parse_raceresult(htmls[("raceresult", rno)])
         day["races"][rno] = {
@@ -439,6 +455,11 @@ def fetch_day(date_str, save_html=False):
             day["meta"]["節名"] = title
             day["meta"]["グレード"] = grade
         binfo, ex_starts = parse_beforeinfo(htmls[("beforeinfo", rno)])
+        deadlines = parse_deadlines(htmls[("racelist", rno)])
+        day["race_extra"][rno] = {
+            "締切時刻": deadlines[rno - 1] if len(deadlines) >= rno else "",
+            "安定板": next((b.get("安定板", "") for b in binfo.values()), ""),
+        }
         places = day["races"][rno]["places"]
         boat_place = {b: p for p, b in places.items()}
         ex_by_boat = {b: (c, st) for c, b, st, _e in ex_starts}
@@ -483,6 +504,7 @@ def write_day(day, odds12_done):
             info = day["racers"].get(rno, {}).get(waku, {})
             racer_rows.append([d, rno, waku] + [info.get(k, "") for k in RACERS_HEADER[3:]])
             extra_rows.append([d, rno, waku] + [info.get(k, "") for k in RACERS_EXTRA_HEADER[3:]])
+    race_extra_rows = [[d, rno] + [day["race_extra"].get(rno, {}).get(k, "") for k in RACE_EXTRA_HEADER[2:]] for rno in MAIN_RACES]
     race_rows = []
     for rno in range(1, 13):
         r = day["races"][rno]
@@ -492,6 +514,7 @@ def write_day(day, odds12_done):
     with _write_lock:
         append_rows(RACERS_CSV, RACERS_HEADER, racer_rows)
         append_rows(RACERS_EXTRA_CSV, RACERS_EXTRA_HEADER, extra_rows)
+        append_rows(RACE_EXTRA_CSV, RACE_EXTRA_HEADER, race_extra_rows)
         append_rows(RACES_CSV, RACES_HEADER, race_rows)
         append_rows(META_CSV, META_HEADER, [meta_row])
         if day["odds11"]:
@@ -522,6 +545,7 @@ def sort_csv(path, header, key_cols):
 def sort_all():
     sort_csv(RACERS_CSV, RACERS_HEADER, (0, 1, 2))
     sort_csv(RACERS_EXTRA_CSV, RACERS_EXTRA_HEADER, (0, 1, 2))
+    sort_csv(RACE_EXTRA_CSV, RACE_EXTRA_HEADER, (0, 1))
     sort_csv(RACES_CSV, RACES_HEADER, (0, 1))
     sort_csv(META_CSV, META_HEADER, (0,))
     sort_csv(ODDS11_CSV, ODDS_HEADER, (0,))
