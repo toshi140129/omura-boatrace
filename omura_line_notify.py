@@ -257,12 +257,35 @@ def parse_weather(soup):
     return out
 
 
+BEFORE_EXTRA = {}  # 直前情報の追加項目（チルト・スタート展示の進入）。parse_beforeinfo が rno に関係なく最後に読んだものを置く
+
+
+def parse_start_exhibition(soup):
+    """スタート展示の進入順 [艇番, ...]（コース1から）。読めなければ []"""
+    try:
+        for tbl in soup.select("table"):
+            head = nfkc(tbl.get_text(" ", strip=True))
+            if "スタート展示" not in head and "展示" not in head:
+                continue
+            order = []
+            for span in tbl.select("span.table1_boatImage1Number"):
+                n = first_num(span.get_text(), r"[1-6]")
+                if n:
+                    order.append(n)
+            if len(order) >= 5:
+                return order
+    except Exception:
+        pass
+    return []
+
+
 def parse_beforeinfo(html):
-    """({枠: 展示タイム}, 天気dict)"""
+    """({枠: 展示タイム}, 天気dict)。チルトと進入は BEFORE_EXTRA にも入れる"""
     if no_data(html):
         return ({}, {"天気": "", "風速": "", "波高": ""})
     soup = BeautifulSoup(html, "html.parser")
     ex = {}
+    tilt = {}
     for tb in soup.select("tbody.is-fs12"):
         trs = tb.find_all("tr")
         if not trs:
@@ -273,6 +296,9 @@ def parse_beforeinfo(html):
         waku = first_num(tds[0].get_text(), r"\d")
         if waku:
             ex[waku] = first_num(tds[4].get_text(), r"\d\.\d{2}")
+            tilt[waku] = first_num(tds[5].get_text(), r"-?\d+(?:\.\d+)?")
+    if ex:
+        BEFORE_EXTRA[len(BEFORE_EXTRA)] = {"tilt": tilt, "start": parse_start_exhibition(soup)}
     return (ex, parse_weather(soup))
 
 
@@ -529,6 +555,7 @@ def main():
             "r12": r12p, "r12_pay": p12, "r10_rows": raw_rows,
             "racers12": parse_racelist(fr.result()),
             "before12": parse_beforeinfo(fb12.result()),
+            "before12_extra": (BEFORE_EXTRA.get(max(BEFORE_EXTRA)) if BEFORE_EXTRA else {}),
             "before11": parse_beforeinfo(fb11.result()),
             "odds12": parse_odds3t(fo.result()),
         }, ensure_ascii=False), flush=True)
@@ -667,6 +694,43 @@ def main():
             skip.append("展示4位以下")
     else:
         checks.append(("1号艇展示", True, "未発表→締切10分前ごろ直前情報で確認。4位以下なら見送り"))
+
+    # チルト（1号艇以外に0.5以上 / 1号艇自身が0.5以上）とスタート展示の進入（枠なりでない）
+    extra12 = {}
+    try:
+        _b12 = parse_beforeinfo(fetch_html(url_for("beforeinfo", 12, date)))
+        if _b12[0] and BEFORE_EXTRA:
+            extra12 = BEFORE_EXTRA.get(max(BEFORE_EXTRA)) or {}
+    except Exception:
+        extra12 = {}
+    tilts = {}
+    for k, v in (extra12.get("tilt") or {}).items():
+        try:
+            tilts[k] = float(v)
+        except (TypeError, ValueError):
+            pass
+    if tilts:
+        up = [k for k, v in tilts.items() if k != "1" and v >= 0.5]
+        ok = not up
+        detail = " ".join(f"{k}号{tilts[k]:+.1f}" for k in sorted(tilts))
+        checks.append(("他艇チルト", ok, detail + ("" if ok else f"（{'・'.join(up)}号艇が0.5以上）")))
+        if not ok:
+            skip.append("他艇チルト0.5以上")
+        if "1" in tilts:
+            ok1 = tilts["1"] < 0.5
+            checks.append(("1号艇チルト", ok1, f"{tilts['1']:+.1f}"))
+            if not ok1:
+                skip.append("1号艇チルト0.5以上")
+    else:
+        checks.append(("チルト", True, "未発表→直前情報で確認。1号艇以外に0.5以上がいれば見送り"))
+    start = extra12.get("start") or []
+    if start:
+        ok = start == [str(i) for i in range(1, len(start) + 1)]
+        checks.append(("展示進入", ok, "-".join(start) + ("" if ok else "（枠なりでない）")))
+        if not ok:
+            skip.append("展示進入")
+    else:
+        checks.append(("展示進入", True, "未発表→直前情報で確認。枠なりでなければ見送り"))
 
     note2 = ""
     if r10:
