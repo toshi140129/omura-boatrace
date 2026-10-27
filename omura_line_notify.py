@@ -6,8 +6,9 @@ omura_line_notify.py — 大村12R「熱い日」LINE通知
   2. 11Rの結果が確定するまで待つ（20秒おきに確認。待つ間に10R結果・12R出走表は先に取っておく）
   3. 11Rの1着が1号艇なら、A=11Rの2着・B=11Rの3着 を使って
      12Rの買い目 1-A-全 / 1-B-全 / 1-全-A / 1-全-B のうち40倍未満を抽出
-  4. 見送り条件（12Rが雨 / 1号艇の全国勝率が他艇最高より1.0以上低い /
-     1号艇の展示タイムが4位以下）と②（10Rと11Rの3着順が完全一致）を判定
+  4. 見送り条件（12Rが雨・曇り / 1号艇の全国勝率が他艇最高より1.0以上低い /
+     1号艇の展示タイムが4位以下 / チルト・展示進入）と②（10Rと11Rの3着順が完全一致）を判定
+     ＋追い風（1号艇が長崎支部 / 1号艇がB級）があれば本文で強調する
   5. 1万円を 1/オッズ比で配分した買い目表をLINEにプッシュ送信（1日1通だけ。情報が揃った時点ですぐ送る）
      ※12Rの展示タイムは締切10分前ごろにしか出ないので待たない。出ていれば判定に入れる
 
@@ -211,7 +212,7 @@ def parse_raceresult(html):
 
 # ---------------------------------------------------------------- 出走表（勝率）
 def parse_racelist(html):
-    """{枠: {選手名, 級別, 全国勝率}}"""
+    """{枠: {選手名, 級別, 支部, 全国勝率, 当地勝率}}"""
     if no_data(html):
         return {}
     soup = BeautifulSoup(html, "html.parser")
@@ -235,9 +236,19 @@ def parse_racelist(html):
         vals = [v for v in vals if v != ""]
         lvals = [first_num(t) for t in lines(tds[5])] if len(tds) > 5 else []
         lvals = [v for v in lvals if v != ""]
+        # 「広島/広島」のように <br> 区切りで 支部/出身地 が1行で出る（登録番号・年齢/体重の行は除く）
+        branch = ""
+        for t in lines(cell):
+            if "歳" in t or "kg" in t or re.search(r"\d{4}", t):
+                continue
+            mb = re.fullmatch(r"([^\s/]+)\s*/\s*([^\s/]+)", t)
+            if mb:
+                branch = mb.group(1)
+                break
         boats[waku] = {
             "選手名": name,
             "級別": m.group(1) if m else "",
+            "支部": branch,
             "全国勝率": vals[0] if vals else "",
             "当地勝率": lvals[0] if lvals else "",
         }
@@ -439,6 +450,11 @@ def build_message(ctx):
         L.append("判定: ◎ 買い（見送り条件なし）")
     if ctx["note2"]:
         L.append(ctx["note2"])
+    if ctx.get("boosts"):
+        L.append("")
+        L.append("■追い風（強い日）")
+        for b in ctx["boosts"]:
+            L.append("◎ " + b)
     L.append("")
     if ctx["bet_mode"] == "favorite":
         fav = ctx["favorites"]
@@ -739,9 +755,12 @@ def main():
     wtxt = weather.get("天気", "")
     detail = f"{wtxt or '不明'} 風{weather.get('風速') or '?'}m 波{weather.get('波高') or '?'}cm{weather_note}"
     rain = "雨" in wtxt or "雪" in wtxt
-    checks.append(("天気", not rain, detail))
+    cloudy = (not rain) and ("曇" in wtxt)
+    checks.append(("天気", not (rain or cloudy), detail))
     if rain:
         skip.append("雨")
+    elif cloudy:
+        skip.append("曇り")
 
     try:
         wr1 = float(racers.get("1", {}).get("全国勝率", ""))
@@ -813,6 +832,14 @@ def main():
     else:
         checks.insert(0, ("②着順不一致", True, "10R結果を取得できず"))
 
+    # 追い風（見送りではなく「この日の1号艇は強い」の後押し。2026-10-27 検証、1番人気1点・2万定額）
+    boosts = []
+    b1 = racers.get("1", {})
+    if b1.get("支部") == "長崎":
+        boosts.append(f"1号艇 {b1.get('選手名', '')} は地元・長崎支部（該当55日 的中24%・回収率160%）")
+    if (b1.get("級別") or "").startswith("B"):
+        boosts.append(f"1号艇 {b1.get('選手名', '')} は{b1.get('級別')}（B級1号艇は回収率228%。見送らない）")
+
     # 1番人気（オッズ最小）上位3つ
     favorites = sorted(((c, o) for c, o in odds.items() if o is not None), key=lambda x: x[1])[:3]
 
@@ -832,7 +859,7 @@ def main():
     ctx = {
         "date": date, "weekday": day.weekday(), "event_type": event_type,
         "r11": r11, "r11_pay": r11_pay, "a": a, "b": b, "d12": d12,
-        "checks": checks, "skip_reasons": skip, "note2": note2,
+        "checks": checks, "skip_reasons": skip, "note2": note2, "boosts": boosts,
         "alloc": alloc, "synth": synth, "odds_time": odds_time, "odds_final": odds_final,
         "odds_missing": not odds, "dropped": dropped,
         "bet_mode": bet_mode, "budget": budget, "favorites": favorites,
