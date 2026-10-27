@@ -6,7 +6,7 @@ boatrace.jp の大村ページには潮位が出ないので、気象庁の「�
 大村湾は湾口（針尾瀬戸）が狭く、長崎より潮差が小さく時刻も遅れるので「長崎の潮位」として扱うこと。
 
   テキストの形式（1行=1日）: 1〜72桁 毎時潮位(0〜23時, 3桁cm) / 73〜78桁 年月日 / 79〜80桁 地点記号 /
-  81〜108桁 満潮 時刻(hhmm)+潮位(4桁)×4 / 109〜136桁 干潮 ×4。欠損は 99/9999。
+  81〜108桁 満潮 時刻(hhmm)+潮位(3桁cm)の7桁×4 / 109〜136桁 干潮 ×4。欠損は 9999999（時刻が空白始まりなら0埋め）。
   URL: https://www.data.jma.go.jp/kaiyou/data/db/tide/suisan/txt/{年}/{地点記号}.txt
 
 使い方
@@ -84,9 +84,9 @@ def parse_year(path):
             def pairs(seg):
                 res = []
                 for k in range(4):
-                    t = seg[k * 8:k * 8 + 4].strip()
-                    h = seg[k * 8 + 4:k * 8 + 8].strip()
-                    if not t or t.startswith("99") or not t.isdigit():
+                    t = seg[k * 7:k * 7 + 4].strip().zfill(4)
+                    h = seg[k * 7 + 4:k * 7 + 7].strip()
+                    if not t.isdigit() or t.startswith("99") or not h or h.startswith("99"):
                         continue
                     try:
                         res.append((int(t[:2]) * 60 + int(t[2:]), int(h)))
