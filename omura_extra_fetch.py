@@ -13,6 +13,7 @@ omura_results.csv に入っていない「予測の判定材料」を boatrace.j
   omura_11r_odds.csv     11R の3連単確定オッズ120通り（omura_12r_odds.csv と同じ列構成）
   omura_12r_odds.csv     既存ファイル。未取得の日付があれば追記する
   omura_daily_extra.csv  上記から作る 1行=1日 の要約（omura_results.csv と「日付」で結合して分析に使う）
+  omura_racers_extra.csv 1行=1艇。10R/11R/12R の支部・出身地・プロペラ・部品交換（直前情報）と、そのレースの安定板使用（1/0）
 
 使い方
   python omura_extra_fetch.py                  # omura_results.csv の全日付のうち未取得分を取得し、要約CSVを再生成
@@ -46,6 +47,7 @@ META_CSV = os.path.join(HERE, "omura_meta.csv")
 ODDS11_CSV = os.path.join(HERE, "omura_11r_odds.csv")
 ODDS12_CSV = os.path.join(HERE, "omura_12r_odds.csv")
 DAILY_EXTRA_CSV = os.path.join(HERE, "omura_daily_extra.csv")
+RACERS_EXTRA_CSV = os.path.join(HERE, "omura_racers_extra.csv")
 DEBUG_DIR = os.path.join(HERE, "extra_debug")
 
 JYOJO = "24"
@@ -65,6 +67,7 @@ RACERS_HEADER = [
     "本番進入", "本番ST", "着順",
 ]
 RACES_HEADER = ["日付", "R", "レース種別", "1着", "2着", "3着", "3連単払戻", "決まり手"]
+RACERS_EXTRA_HEADER = ["日付", "R", "枠", "登録番号", "選手名", "支部", "出身地", "プロペラ", "部品交換", "安定板"]
 META_HEADER = ["日付", "節名", "グレード"]
 COMBOS = [f"{a}-{b}-{c}" for a, b, c in permutations(range(1, 7), 3)]
 ODDS_HEADER = ["日付"] + COMBOS
@@ -128,6 +131,34 @@ GRADE_JP = {
     "SG": "SG", "PG1": "G1", "G1": "G1", "G2": "G2", "G3": "G3", "ippan": "一般",
     "ladies": "一般", "rookie": "一般", "venus": "一般", "takumi": "一般", "master": "一般", "shinnyu": "一般",
 }
+
+
+def parse_branch(cell):
+    """出走表の選手セルから (支部, 出身地) を返す。「広島/広島」のように <br> 区切りの1行で出る"""
+    for t in lines(cell):
+        if "歳" in t or "kg" in t or re.search(r"\d{4}", t):
+            continue
+        m = re.fullmatch(r"([^\s/]+)\s*/\s*([^\s/]+)", t)
+        if m:
+            return (m.group(1), m.group(2))
+    # 保険: セル全体のテキストから「支部/出身地 年齢歳」の並びを探す
+    ct = nfkc(cell.get_text(" ", strip=True))
+    m = re.search(r"([^\s/\d]+)\s*/\s*([^\s/\d]+)\s*\d+歳", ct)
+    return (m.group(1), m.group(2)) if m else ("", "")
+
+
+def parse_stabilizer_flag(soup):
+    """ページ見出し付近の「安定板使用」ラベルの有無。戻り値: ("1"/"0", 根拠テキスト)"""
+    for node in soup.find_all(string=re.compile("安定板")):
+        parent = node.parent
+        # 凡例や表の中（部品交換凡例など）は対象外。見出し・ラベル要素だけを見る
+        if parent.find_parent("table") is not None:
+            continue
+        txt = nfkc(str(node))
+        if "安定板" in txt:
+            cls = " ".join(parent.get("class", []))
+            return ("1", f"{parent.name}.{cls}:{txt}"[:60])
+    return ("0", "")
 
 
 def parse_racelist(html):
@@ -198,6 +229,7 @@ def parse_racelist(html):
         info["年齢"] = m.group(1) if m else ""
         m = re.search(r"(\d+(?:\.\d+)?)kg", ct)
         info["体重"] = m.group(1) if m else ""
+        info["支部"], info["出身地"] = parse_branch(cell)
 
         fl = lines(tds[3])
         info["F数"] = info["L数"] = info["平均ST"] = ""
@@ -253,10 +285,11 @@ def parse_start_table(soup, keyword):
 
 
 def parse_beforeinfo(html):
-    """直前情報。戻り値: ({枠: {体重, 調整重量, 展示タイム, チルト}}, [(コース, 艇, 展示ST, 補足)])"""
+    """直前情報。戻り値: ({枠: {体重, 調整重量, 展示タイム, チルト, プロペラ, 部品交換, 安定板}}, [(コース, 艇, 展示ST, 補足)])"""
     if no_data(html):
         return ({}, [])
     soup = BeautifulSoup(html, "html.parser")
+    stab, _why = parse_stabilizer_flag(soup)
     boats = {}
     for tb in soup.select("tbody.is-fs12"):
         trs = tb.find_all("tr")
@@ -268,11 +301,15 @@ def parse_beforeinfo(html):
         waku = first_num(tds[0].get_text(), r"\d")
         if not waku:
             continue
-        info = {"体重": "", "調整重量": "", "展示タイム": "", "チルト": ""}
+        info = {"体重": "", "調整重量": "", "展示タイム": "", "チルト": "", "プロペラ": "", "部品交換": "", "安定板": stab}
         # 1行目の td: 0=枠, 1=写真, 2=選手名, 3=体重, 4=展示タイム, 5=チルト, 6=プロペラ, 7=部品交換, 8以降=前走成績
         info["体重"] = first_num(tds[3].get_text(), r"\d+(?:\.\d+)?")
         info["展示タイム"] = first_num(tds[4].get_text(), r"\d\.\d{2}")
         info["チルト"] = first_num(tds[5].get_text(), r"-?\d+(?:\.\d+)?")
+        if len(tds) > 6:
+            info["プロペラ"] = " ".join(lines(tds[6]))
+        if len(tds) > 7:
+            info["部品交換"] = "・".join(lines(tds[7]))
         # 3行目の先頭 td が調整重量（"0.0" "1.5" など小数）。2行目の「進入」の整数は除外する
         for tr in trs[1:]:
             tds2 = tr.find_all("td")
@@ -440,11 +477,12 @@ def append_rows(path, header, rows):
 
 def write_day(day, odds12_done):
     d = day["日付"]
-    racer_rows = []
+    racer_rows, extra_rows = [], []
     for rno in MAIN_RACES:
         for waku in "123456":
             info = day["racers"].get(rno, {}).get(waku, {})
             racer_rows.append([d, rno, waku] + [info.get(k, "") for k in RACERS_HEADER[3:]])
+            extra_rows.append([d, rno, waku] + [info.get(k, "") for k in RACERS_EXTRA_HEADER[3:]])
     race_rows = []
     for rno in range(1, 13):
         r = day["races"][rno]
@@ -453,6 +491,7 @@ def write_day(day, odds12_done):
     meta_row = [d, day["meta"].get("節名", ""), day["meta"].get("グレード", "")]
     with _write_lock:
         append_rows(RACERS_CSV, RACERS_HEADER, racer_rows)
+        append_rows(RACERS_EXTRA_CSV, RACERS_EXTRA_HEADER, extra_rows)
         append_rows(RACES_CSV, RACES_HEADER, race_rows)
         append_rows(META_CSV, META_HEADER, [meta_row])
         if day["odds11"]:
@@ -482,6 +521,7 @@ def sort_csv(path, header, key_cols):
 
 def sort_all():
     sort_csv(RACERS_CSV, RACERS_HEADER, (0, 1, 2))
+    sort_csv(RACERS_EXTRA_CSV, RACERS_EXTRA_HEADER, (0, 1, 2))
     sort_csv(RACES_CSV, RACES_HEADER, (0, 1))
     sort_csv(META_CSV, META_HEADER, (0,))
     sort_csv(ODDS11_CSV, ODDS_HEADER, (0,))
@@ -688,7 +728,7 @@ def run_test(date_str):
     for rno in MAIN_RACES:
         for waku in "123456":
             info = day["racers"][rno][waku]
-            for k in ("級別", "全国勝率", "モーター2連率", "展示タイム", "展示ST", "本番ST", "着順"):
+            for k in ("級別", "全国勝率", "モーター2連率", "展示タイム", "展示ST", "本番ST", "着順", "支部"):
                 if not info.get(k):
                     missing.append(f"{rno}R-{waku}:{k}")
     print("空欄:", ", ".join(missing[:30]) if missing else "なし")
