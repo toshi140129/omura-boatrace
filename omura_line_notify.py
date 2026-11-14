@@ -488,6 +488,92 @@ def build_message(ctx):
     return "\n".join(L)
 
 
+# ---------------------------------------------------------------- 見送り判定
+def judge(racers, ex, weather, weather_note, extra12, r10, r11, bet_mode=BET_MODE_DEFAULT):
+    """見送り判定。(checks, skip, note2) を返す。
+
+    racers: parse_racelist の結果 / ex: {枠: 展示タイム} / weather: {天気, 風速, 波高}
+    extra12: {"tilt": {枠: チルト}, "start": [進入順の艇番]} / r10, r11: {着順: 艇番}
+    omura_verify.py（答え合わせ）も過去データでこの関数を直接呼んで、正解と突き合わせる。
+    """
+    checks, skip = [], []
+    same3 = bool(r10) and all(r10.get(k) == r11.get(k) for k in ("1", "2", "3"))
+    wtxt = weather.get("天気", "")
+    detail = f"{wtxt or '不明'} 風{weather.get('風速') or '?'}m 波{weather.get('波高') or '?'}cm{weather_note}"
+    rain = "雨" in wtxt or "雪" in wtxt
+    cloudy = (not rain) and ("曇" in wtxt)
+    checks.append(("天気", not (rain or cloudy), detail))
+    if rain:
+        skip.append("雨")
+    elif cloudy:
+        skip.append("曇り")
+
+    try:
+        wr1 = float(racers.get("1", {}).get("全国勝率", ""))
+        others = [float(v["全国勝率"]) for k, v in racers.items() if k != "1" and v.get("全国勝率")]
+        diff = round(wr1 - max(others), 2)  # 6.29−7.29 が −0.9999… にならないよう小数2桁で丸める
+        ok = diff > -1.0
+        checks.append(("1号艇勝率", ok, f"{wr1:.2f}（他艇最高 {max(others):.2f}、差 {diff:+.2f}）"))
+        if not ok:
+            skip.append("勝率差")
+    except (ValueError, TypeError):
+        checks.append(("1号艇勝率", True, "取得できず"))
+
+    times = {k: float(v) for k, v in ex.items() if v}
+    # 欠場で5艇しか展示しない日もあるので、5艇以上そろえば出走艇の中での順位で判定する
+    if len(times) >= 5 and "1" in times:
+        rank = 1 + sum(1 for k, v in times.items() if k != "1" and v < times["1"])
+        ok = rank <= 3
+        checks.append(("1号艇展示", ok, f"{times['1']:.2f}（{rank}位）"))
+        if not ok:
+            skip.append("展示4位以下")
+    else:
+        checks.append(("1号艇展示", True, "未発表→締切10分前ごろ直前情報で確認。4位以下なら見送り"))
+
+    tilts = {}
+    for k, v in (extra12.get("tilt") or {}).items():
+        try:
+            tilts[k] = float(v)
+        except (TypeError, ValueError):
+            pass
+    if tilts:
+        up = [k for k, v in tilts.items() if k != "1" and v >= 0.5]
+        ok = not up
+        detail = " ".join(f"{k}号{tilts[k]:+.1f}" for k in sorted(tilts))
+        checks.append(("他艇チルト", ok, detail + ("" if ok else f"（{'・'.join(up)}号艇が0.5以上）")))
+        if not ok:
+            skip.append("他艇チルト0.5以上")
+        if "1" in tilts:
+            ok1 = tilts["1"] < 0.5
+            checks.append(("1号艇チルト", ok1, f"{tilts['1']:+.1f}"))
+            if not ok1:
+                skip.append("1号艇チルト0.5以上")
+    else:
+        checks.append(("チルト", True, "未発表→直前情報で確認。1号艇以外に0.5以上がいれば見送り"))
+    start = extra12.get("start") or []
+    if start:
+        # 欠場がある日は 1-2-4-5-6 のように番号が飛ぶので、「枠番の小さい順に並んでいる」を枠なりとする
+        ok = all(int(a) < int(b) for a, b in zip(start, start[1:]))
+        checks.append(("展示進入", ok, "-".join(start) + ("" if ok else "（枠なりでない）")))
+        if not ok:
+            skip.append("展示進入")
+    else:
+        checks.append(("展示進入", True, "未発表→直前情報で確認。枠なりでなければ見送り"))
+
+    note2 = ""
+    if r10:
+        c2detail = f"10R {r10['1']}-{r10['2']}-{r10['3']} / 11R {r11['1']}-{r11['2']}-{r11['3']}"
+        checks.insert(0, ("②着順不一致", not same3, c2detail + ("（完全一致）" if same3 else "")))
+        if same3:
+            if bet_mode == "favorite":
+                skip.append("②不成立")
+            else:
+                note2 = f"※②注意: 10Rと11Rの3着順が完全一致（{r10['1']}-{r10['2']}-{r10['3']}）"
+    else:
+        checks.insert(0, ("②着順不一致", True, "10R結果を取得できず"))
+    return checks, skip, note2
+
+
 # ---------------------------------------------------------------- 本体
 def mark_done():
     out = os.environ.get("GITHUB_OUTPUT")
@@ -520,6 +606,15 @@ def _git(*args, check=True):
     return subprocess.run(["git", "-C", HERE, *args], capture_output=True, text=True, check=check)
 
 
+def _git_stdin(args, data, env=None):
+    """標準入力つきで git を動かし、出力の1行目を返す。
+    text=True だと Windows では改行が CR+LF に変わり、mktree のファイル名に CR が混ざる
+    （2026-11 に PC から書いた記録が「sent(CR)/20261113.txt(CR)」になり、GitHub側から見えなかった）ので、バイト列で渡す。"""
+    r = subprocess.run(["git", "-C", HERE, *args], input=data.encode("utf-8"),
+                       capture_output=True, check=True, env=env)
+    return r.stdout.decode("utf-8").strip()
+
+
 def shared_marker_exists(date):
     """notify-state ブランチに sent/<date>.txt があれば True（git が無い・取れないときは False）"""
     try:
@@ -536,8 +631,7 @@ def shared_marker_write(date, who):
     """notify-state ブランチに sent/<date>.txt を追加して push（失敗しても通知自体には影響させない）"""
     try:
         content = f"{who} {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}\n"
-        blob = subprocess.run(["git", "-C", HERE, "hash-object", "-w", "--stdin"], input=content,
-                              capture_output=True, text=True, check=True).stdout.strip()
+        blob = _git_stdin(["hash-object", "-w", "--stdin"], content)
         have_remote = _git("fetch", "--quiet", "origin", SHARED_BRANCH, check=False).returncode == 0
         entries = []
         parent = []
@@ -551,10 +645,8 @@ def shared_marker_write(date, who):
                     entries.append(line)
         entries.append(f"100644 blob {blob}\tsent/{date}.txt")
         # sent/ 以下を1つのツリーにして、その上にルートツリーを作る
-        sub = subprocess.run(["git", "-C", HERE, "mktree"], input="\n".join(
-            e.replace("\tsent/", "\t") for e in entries) + "\n", capture_output=True, text=True, check=True).stdout.strip()
-        root = subprocess.run(["git", "-C", HERE, "mktree"], input=f"040000 tree {sub}\tsent\n",
-                              capture_output=True, text=True, check=True).stdout.strip()
+        sub = _git_stdin(["mktree"], "\n".join(e.replace("\tsent/", "\t") for e in entries) + "\n")
+        root = _git_stdin(["mktree"], f"040000 tree {sub}\tsent\n")
         env = dict(os.environ, GIT_AUTHOR_NAME="omura-line-notify", GIT_AUTHOR_EMAIL="noreply@example.com",
                    GIT_COMMITTER_NAME="omura-line-notify", GIT_COMMITTER_EMAIL="noreply@example.com")
         commit = subprocess.run(["git", "-C", HERE, "commit-tree", root, *parent, "-m", f"sent {date} by {who}"],
@@ -730,7 +822,6 @@ def main():
         r10 = got["r10"][0]
     if "racers" in got:
         racers = got["racers"]
-    same3 = bool(r10) and all(r10.get(k) == r11.get(k) for k in ("1", "2", "3"))
     ex, weather = got["before12"]
     weather_note = ""
     if not weather.get("天気"):
@@ -751,38 +842,6 @@ def main():
     odds_final = bool(t12) and datetime.now(JST) > t12
 
     # 4. 見送り判定
-    checks, skip = [], []
-    wtxt = weather.get("天気", "")
-    detail = f"{wtxt or '不明'} 風{weather.get('風速') or '?'}m 波{weather.get('波高') or '?'}cm{weather_note}"
-    rain = "雨" in wtxt or "雪" in wtxt
-    cloudy = (not rain) and ("曇" in wtxt)
-    checks.append(("天気", not (rain or cloudy), detail))
-    if rain:
-        skip.append("雨")
-    elif cloudy:
-        skip.append("曇り")
-
-    try:
-        wr1 = float(racers.get("1", {}).get("全国勝率", ""))
-        others = [float(v["全国勝率"]) for k, v in racers.items() if k != "1" and v.get("全国勝率")]
-        diff = wr1 - max(others)
-        ok = diff > -1.0
-        checks.append(("1号艇勝率", ok, f"{wr1:.2f}（他艇最高 {max(others):.2f}、差 {diff:+.2f}）"))
-        if not ok:
-            skip.append("勝率差")
-    except (ValueError, TypeError):
-        checks.append(("1号艇勝率", True, "取得できず"))
-
-    times = {k: float(v) for k, v in ex.items() if v}
-    if len(times) >= 6 and "1" in times:
-        rank = 1 + sum(1 for k, v in times.items() if k != "1" and v < times["1"])
-        ok = rank <= 3
-        checks.append(("1号艇展示", ok, f"{times['1']:.2f}（{rank}位）"))
-        if not ok:
-            skip.append("展示4位以下")
-    else:
-        checks.append(("1号艇展示", True, "未発表→締切10分前ごろ直前情報で確認。4位以下なら見送り"))
-
     # チルト（1号艇以外に0.5以上 / 1号艇自身が0.5以上）とスタート展示の進入（枠なりでない）
     extra12 = {}
     try:
@@ -791,54 +850,15 @@ def main():
             extra12 = BEFORE_EXTRA.get(max(BEFORE_EXTRA)) or {}
     except Exception:
         extra12 = {}
-    tilts = {}
-    for k, v in (extra12.get("tilt") or {}).items():
-        try:
-            tilts[k] = float(v)
-        except (TypeError, ValueError):
-            pass
-    if tilts:
-        up = [k for k, v in tilts.items() if k != "1" and v >= 0.5]
-        ok = not up
-        detail = " ".join(f"{k}号{tilts[k]:+.1f}" for k in sorted(tilts))
-        checks.append(("他艇チルト", ok, detail + ("" if ok else f"（{'・'.join(up)}号艇が0.5以上）")))
-        if not ok:
-            skip.append("他艇チルト0.5以上")
-        if "1" in tilts:
-            ok1 = tilts["1"] < 0.5
-            checks.append(("1号艇チルト", ok1, f"{tilts['1']:+.1f}"))
-            if not ok1:
-                skip.append("1号艇チルト0.5以上")
-    else:
-        checks.append(("チルト", True, "未発表→直前情報で確認。1号艇以外に0.5以上がいれば見送り"))
-    start = extra12.get("start") or []
-    if start:
-        ok = start == [str(i) for i in range(1, len(start) + 1)]
-        checks.append(("展示進入", ok, "-".join(start) + ("" if ok else "（枠なりでない）")))
-        if not ok:
-            skip.append("展示進入")
-    else:
-        checks.append(("展示進入", True, "未発表→直前情報で確認。枠なりでなければ見送り"))
+    checks, skip, note2 = judge(racers, ex, weather, weather_note, extra12, r10, r11, bet_mode)
 
-    note2 = ""
-    if r10:
-        c2detail = f"10R {r10['1']}-{r10['2']}-{r10['3']} / 11R {r11['1']}-{r11['2']}-{r11['3']}"
-        checks.insert(0, ("②着順不一致", not same3, c2detail + ("（完全一致）" if same3 else "")))
-        if same3:
-            if bet_mode == "favorite":
-                skip.append("②不成立")
-            else:
-                note2 = f"※②注意: 10Rと11Rの3着順が完全一致（{r10['1']}-{r10['2']}-{r10['3']}）"
-    else:
-        checks.insert(0, ("②着順不一致", True, "10R結果を取得できず"))
-
-    # 追い風（見送りではなく「この日の1号艇は強い」の後押し。2026-10-27 検証、1番人気1点・2万定額）
+    # 追い風（見送りではなく「この日の1号艇は強い」の後押し。数字は買う日の中で数え直したもの。omura_verify.py が照合する）
     boosts = []
     b1 = racers.get("1", {})
     if b1.get("支部") == "長崎":
-        boosts.append(f"1号艇 {b1.get('選手名', '')} は地元・長崎支部（該当55日 的中24%・回収率160%）")
+        boosts.append(f"1号艇 {b1.get('選手名', '')} は地元・長崎支部（買う日で該当22日 的中36%・回収率242%）")
     if (b1.get("級別") or "").startswith("B"):
-        boosts.append(f"1号艇 {b1.get('選手名', '')} は{b1.get('級別')}（B級1号艇は回収率228%。見送らない）")
+        boosts.append(f"1号艇 {b1.get('選手名', '')} は{b1.get('級別')}（B級1号艇は買う日で該当11日 回収率343%。見送らない）")
 
     # 1番人気（オッズ最小）上位3つ
     favorites = sorted(((c, o) for c, o in odds.items() if o is not None), key=lambda x: x[1])[:3]

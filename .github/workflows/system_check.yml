@@ -1,0 +1,73 @@
+name: システムの答え合わせ
+
+# 毎朝、アプリ・LINE通知・データが正しいかを、元データから別に計算し直した正解と突き合わせる（omura_verify.py）。
+# ずれ（NG）があれば失敗にして LINE で知らせる。月曜は「問題なし」も1通送る。
+# PC の毎朝 08:05 のデータ取得が終わったあとに動くよう、日本時間 9:23 ごろに起動（cron は UTC 表記）。
+on:
+  schedule:
+    - cron: "23 0 * * *"
+  workflow_dispatch:
+    inputs:
+      send_line:
+        description: "結果を LINE にも送る（問題なしでも）"
+        type: boolean
+        default: false
+      live_days:
+        description: "本番アプリ・boatrace.jp と比べる直近の日数"
+        default: "3"
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 元データ（master ブランチ）
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          path: data
+
+      # PR のときは、omura-webapp に同じ名前のブランチがあればそちらと組み合わせて確認する（両方を一緒に直すとき用）
+      - name: Webアプリのブランチを決める
+        id: webref
+        run: |
+          b="${{ github.head_ref }}"
+          if [ -n "$b" ] && git ls-remote --exit-code --heads https://github.com/toshi140129/omura-webapp.git "$b" >/dev/null; then
+            echo "ref=$b" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=master" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Webアプリ（omura-webapp）
+        uses: actions/checkout@v4
+        with:
+          repository: toshi140129/omura-webapp
+          ref: ${{ steps.webref.outputs.ref }}
+          path: webapp
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 依存パッケージ
+        run: pip install --quiet beautifulsoup4
+
+      - name: 答え合わせ
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # PR では LINE は送らず、送信記録も見ない（boatrace.jp からの読み取りは確認する）
+            python omura_verify.py --data data --webapp webapp --no-sent-log --live
+          else
+            python omura_verify.py --data data --webapp webapp --live --live-days "${{ inputs.live_days || '3' }}" \
+              --line ${{ inputs.send_line && '--line-always' || '' }}
+          fi
