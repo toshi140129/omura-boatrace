@@ -35,6 +35,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -626,6 +627,12 @@ def check_live(rep, data, days, ln, today, n_days):
         try:
             js = fetch_json(f"{APP_URL}/api/today?date={d}")
             got = {s["id"]: s["status"] for s in js.get("signs", [])}
+            if "pending" in got.values():
+                # アプリは boatrace.jp の読み取りを5分キャッシュし、期限切れ後の最初の1回は古い控えを返す
+                # （例: 当日の展示前に読んだもの）。少し待ってもう一度聞き直す
+                time.sleep(20)
+                js = fetch_json(f"{APP_URL}/api/today?date={d}")
+                got = {s["id"]: s["status"] for s in js.get("signs", [])}
             for sid, _ in SIGNS:
                 w = status_of(want[sid])
                 if got.get(sid) != w:
