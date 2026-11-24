@@ -2,10 +2,8 @@ name: 2022年データ取得（参考）
 
 # 2022年分を boatrace.jp から取得して data_2022/ に保存する（本番CSVには触れない）。
 # 6期間に分けて並列取得。1期間あたりの同時接続は本番より少なめ。
+# 取得は 2026-11-24 に完了済み。取り直すときだけ手動で Run workflow する。
 on:
-  push:
-    branches: [claude/project-thread-ycnj0s]
-    paths: [".github/workflows/fetch_2022.yml", "tools_2022/**"]
   workflow_dispatch:
 
 permissions:
