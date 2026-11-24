@@ -1,0 +1,64 @@
+name: 2022年データ取得（参考）
+
+# 2022年分を boatrace.jp から取得して data_2022/ に保存する（本番CSVには触れない）。
+# 6期間に分けて並列取得。1期間あたりの同時接続は本番より少なめ。
+on:
+  push:
+    branches: [claude/project-thread-ycnj0s]
+    paths: [".github/workflows/fetch_2022.yml", "tools_2022/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        span:
+          - "2022-01-01 2022-02-28"
+          - "2022-03-01 2022-04-30"
+          - "2022-05-01 2022-06-30"
+          - "2022-07-01 2022-08-31"
+          - "2022-09-01 2022-10-31"
+          - "2022-11-01 2022-12-31"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install beautifulsoup4 requests
+      - name: 取得
+        run: |
+          mkdir work
+          cp omura_history_fetch.py omura_extra_fetch.py tools_2022/fetch_chunk.py work/
+          cd work && python fetch_chunk.py ${{ matrix.span }}
+      - name: 期間名
+        id: n
+        run: echo "name=$(echo '${{ matrix.span }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part-${{ steps.n.outputs.name }}
+          path: work/*.csv
+
+  merge:
+    needs: fetch
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: parts
+      - run: python tools_2022/merge.py parts data_2022
+      - name: ブランチに保存
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add data_2022
+          git commit -m "2022年データ（参考）を追加" || exit 0
+          git pull --rebase origin ${{ github.ref_name }}
+          git push origin HEAD:${{ github.ref_name }}
