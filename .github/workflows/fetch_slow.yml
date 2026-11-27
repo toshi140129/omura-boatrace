@@ -1,0 +1,69 @@
+name: 2016〜2021年データ取得（参考・低速）
+
+# boatrace.jp に残っている最古（2016-10末）〜2021年を6ジョブ・各最大6接続でゆっくり取得し data_2016_2021/ に保存する（本番CSVには触れない）。
+# 2014〜2016年秋は boatrace.jp にデータが無い。2026-11-24 は同時接続が多すぎて 403 拒否されたので fetch_slow.py で間隔を空ける。
+on:
+  push:
+    branches: [claude/project-thread-ycnj0s]
+    paths: [".github/workflows/fetch_slow.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        span:
+          - "2016-10-01 2017-08-31"
+          - "2017-09-01 2018-07-31"
+          - "2018-08-01 2019-06-30"
+          - "2019-07-01 2020-05-31"
+          - "2020-06-01 2021-03-31"
+          - "2021-04-01 2021-12-31"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install beautifulsoup4 requests
+      - name: 取得
+        run: |
+          mkdir work
+          cp omura_history_fetch.py omura_extra_fetch.py tools_2022/fetch_slow.py work/
+          cd work && python fetch_slow.py ${{ matrix.span }}
+      - name: 期間名
+        if: always()
+        id: n
+        run: echo "name=$(echo '${{ matrix.span }}' | tr ' ' '_')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: part-${{ steps.n.outputs.name }}
+          path: |
+            work/*.csv
+            work/fetch_failures.txt
+
+  merge:
+    needs: fetch
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: parts
+      - run: python tools_2022/merge.py parts data_2016_2021 && mkdir -p data_2016_2021 && cat parts/*/fetch_failures.txt > data_2016_2021/fetch_failures.txt || true
+      - name: ブランチに保存
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add data_2016_2021
+          git commit -m "2016〜2021年データ（参考）を追加" || exit 0
+          git pull --rebase origin ${{ github.ref_name }}
+          git push origin HEAD:${{ github.ref_name }}
